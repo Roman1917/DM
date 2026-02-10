@@ -153,7 +153,7 @@ function printMenu() {
 2 - Авто-анализ ВСЕХ вещей из data/market-titles.txt (без фильтров) + отчет
 3 - Выставление таргетов на самые выгодные вещи из файла
 4 - Авто-обновление таргетов каждые 15 минут
-5 - Диагностика API и состояния
+5 - Диагностика + 1 вещь из market-titles.txt (target/order)
 6 - Один полный цикл ребаланса прямо сейчас
 0 - Выход
 ==================================================
@@ -344,6 +344,44 @@ async function handleOptionDiagnostics(bot) {
   console.log(`Managed targets total: ${status.managedTargetsTotal}`);
   // eslint-disable-next-line no-console
   console.log(`Market connectivity probe titles (first page): ${scanTitles.length}`);
+
+  // eslint-disable-next-line no-console
+  console.log("\n=== Проверка одной вещи из market-titles.txt ===");
+  let titles = [];
+  try {
+    titles = await loadTitlesFromFile(DEFAULT_TITLES_PATH);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  if (titles.length === 0) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `Файл ${DEFAULT_TITLES_PATH} пустой или не найден. Сначала выполните пункт 1.`,
+    );
+    return;
+  }
+
+  const title = titles[0];
+  const pricing = await bot.analyzeTitlesPricing([title]);
+  if (pricing.length === 0) {
+    // eslint-disable-next-line no-console
+    console.log(`Не удалось получить цены для: ${title}`);
+    return;
+  }
+
+  const item = pricing[0];
+  // eslint-disable-next-line no-console
+  console.log(`Title: ${item.title}`);
+  // eslint-disable-next-line no-console
+  console.log(`Max target: $${roundUsd(item.maxTargetUsd).toFixed(2)}`);
+  // eslint-disable-next-line no-console
+  console.log(`Best order: $${roundUsd(item.orderBestUsd).toFixed(2)}`);
+  // eslint-disable-next-line no-console
+  console.log(`Min offer: $${roundUsd(item.minOfferUsd).toFixed(2)}`);
+  // eslint-disable-next-line no-console
+  console.log(`ROI: ${roundUsd(item.roiPct).toFixed(2)}%`);
 }
 
 async function startAutoMode(bot) {
