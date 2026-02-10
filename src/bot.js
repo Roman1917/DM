@@ -10,7 +10,7 @@ import {
 } from "./strategy.js";
 import { chunkArray, parseNumber, roundUsd, toUsd } from "./utils.js";
 
-function parseBalanceUsd(balance, priceInCoins) {
+export function parseBalanceUsd(balance, priceInCoins) {
   const rawValue =
     balance?.usd ??
     balance?.USD ??
@@ -33,29 +33,44 @@ function toTargetPayload({ title, amount, priceUsd, currency }) {
 }
 
 export class DMarketTargetBot {
-  constructor() {
+  constructor({ loggerInstance = logger } = {}) {
+    this.logger = loggerInstance;
     this.client = new DMarketClient({
       config: config.dmarket,
-      logger,
+      logger: this.logger,
     });
     this.stateStore = new StateStore(config.bot.statePath);
     this.isCycleRunning = false;
+    this.isInitialized = false;
+    this.intervalId = null;
   }
 
-  async start() {
+  async initialize() {
+    if (this.isInitialized) {
+      return;
+    }
+
     await this.stateStore.load();
-    logger.info("State loaded", {
+    this.isInitialized = true;
+    this.logger.info("State loaded", {
       statePath: config.bot.statePath,
       managedTitles: this.stateStore.getManagedTitles().length,
     });
+  }
 
+  async start() {
+    await this.startAutoUpdate();
+  }
+
+  async startAutoUpdate() {
+    await this.initialize();
     await this.runCycleSafe();
     this.intervalId = setInterval(
       () => this.runCycleSafe(),
       config.bot.intervalMs,
     );
 
-    logger.info("Bot started", {
+    this.logger.info("Auto-update mode started", {
       intervalMinutes: config.bot.intervalMinutes,
       gameId: config.bot.gameId,
       dryRun: config.bot.dryRun,
@@ -69,42 +84,40 @@ export class DMarketTargetBot {
     }
   }
 
-  async runCycleSafe() {
-    if (this.isCycleRunning) {
-      logger.warn("Skipping cycle: previous cycle is still running");
-      return;
-    }
+  async getStatusSummary() {
+    await this.initialize();
+    const [balance, activeTargets] = await Promise.all([
+      this.client.getBalance(),
+      this.client.getAllUserTargets({ gameId: config.bot.gameId }),
+    ]);
 
-    this.isCycleRunning = true;
-    const startedAt = Date.now();
+    const balanceUsd = parseBalanceUsd(balance, config.dmarket.priceInCoins);
+    const managedTitles = this.stateStore.getManagedTitles();
 
-    try {
-      await this.runCycle();
-      logger.info("Cycle finished", {
-        durationSec: roundUsd((Date.now() - startedAt) / 1000),
-      });
-    } catch (error) {
-      logger.error("Cycle failed", {
-        message: error.message,
-        stack: error.stack,
-        status: error.status,
-        payload: error.payload,
-      });
-    } finally {
-      this.isCycleRunning = false;
-    }
+    return {
+      balanceUsd: roundUsd(balanceUsd),
+      activeTargetsTotal: activeTargets.length,
+      managedTargetsTotal: managedTitles.length,
+      managedTitles,
+      dryRun: config.bot.dryRun,
+      gameId: config.bot.gameId,
+      currency: config.bot.currency,
+    };
   }
 
-  async discoverTitlesFromMarket() {
+  async discoverTitlesFromMarket({
+    maxPages = config.strategy.scanPages,
+    pageSize = config.strategy.pageSize,
+  } = {}) {
     let cursor = "";
     let page = 0;
     const titles = new Set();
 
-    while (page < config.strategy.scanPages) {
+    while (page < maxPages) {
       const response = await this.client.getMarketItems({
         gameId: config.bot.gameId,
         currency: config.bot.currency,
-        limit: config.strategy.pageSize,
+        limit: pageSize,
         cursor,
       });
 
@@ -143,7 +156,7 @@ export class DMarketTargetBot {
         }
       }
 
-      logger.info("Aggregated price chunk loaded", {
+      this.logger.info("Aggregated price chunk loaded", {
         chunkIndex: index + 1,
         totalChunks: chunks.length,
         requestedTitles: chunk.length,
@@ -154,8 +167,117 @@ export class DMarketTargetBot {
     return byTitle;
   }
 
+  async analyzeTitles(titles) {
+    const uniqueTitles = [...new Set(titles.map((title) => title.trim()))].filter(
+      Boolean,
+    );
+
+    if (uniqueTitles.length === 0) {
+      return [];
+    }
+
+    const aggregatedByTitle = await this.fetchAggregatedPricesByTitle(uniqueTitles);
+    return buildOpportunities([...aggregatedByTitle.values()], {
+      strategy: config.strategy,
+      priceInCoins: config.dmarket.priceInCoins,
+    });
+  }
+
+  async createTargetsForOpportunities(
+    opportunities,
+    { maxNewTargets = config.strategy.newTargetsPerCycle } = {},
+  ) {
+    await this.initialize();
+
+    const [balance, activeTargets] = await Promise.all([
+      this.client.getBalance(),
+      this.client.getAllUserTargets({ gameId: config.bot.gameId }),
+    ]);
+    const balanceUsd = parseBalanceUsd(balance, config.dmarket.priceInCoins);
+
+    const activeTargetsByTitle = new Map(
+      activeTargets
+        .filter((target) => target?.Title)
+        .map((target) => [target.Title, target]),
+    );
+    const currentManagedTargets = this.stateStore
+      .getManagedTitles()
+      .map((title) => activeTargetsByTitle.get(title))
+      .filter(Boolean);
+
+    let committedUsd = 0;
+    for (const target of currentManagedTargets) {
+      const priceUsd = parseTargetPriceUsd(target) || 0;
+      const amount = Math.max(1, Math.floor(parseNumber(target.Amount) || 1));
+      committedUsd += priceUsd * amount;
+    }
+
+    const budgetCapUsd = Math.min(
+      config.strategy.maxBudgetUsd,
+      balanceUsd * config.strategy.balanceUsageRatio,
+    );
+    const availableBudgetUsd = Math.max(0, budgetCapUsd - committedUsd);
+    const freeSlots = Math.max(
+      0,
+      config.strategy.maxManagedTargets - currentManagedTargets.length,
+    );
+
+    const strategyForNew = {
+      ...config.strategy,
+      newTargetsPerCycle: Math.min(maxNewTargets, freeSlots),
+    };
+    const occupiedTitles = [
+      ...new Set(activeTargets.map((target) => target?.Title).filter(Boolean)),
+    ];
+
+    const createPlans = planNewTargets({
+      opportunities,
+      managedTitles: occupiedTitles,
+      strategy: strategyForNew,
+      availableBudgetUsd,
+    });
+
+    await this.applyCreatePlans(createPlans);
+    await this.stateStore.save();
+
+    return {
+      createPlans,
+      balanceUsd: roundUsd(balanceUsd),
+      committedUsd: roundUsd(committedUsd),
+      availableBudgetUsd: roundUsd(availableBudgetUsd),
+      freeSlots,
+    };
+  }
+
+  async runCycleSafe() {
+    if (this.isCycleRunning) {
+      this.logger.warn("Skipping cycle: previous cycle is still running");
+      return;
+    }
+
+    this.isCycleRunning = true;
+    const startedAt = Date.now();
+
+    try {
+      await this.runCycle();
+      this.logger.info("Cycle finished", {
+        durationSec: roundUsd((Date.now() - startedAt) / 1000),
+      });
+    } catch (error) {
+      this.logger.error("Cycle failed", {
+        message: error.message,
+        stack: error.stack,
+        status: error.status,
+        payload: error.payload,
+      });
+    } finally {
+      this.isCycleRunning = false;
+    }
+  }
+
   async runCycle() {
-    logger.info("Starting cycle");
+    await this.initialize();
+    this.logger.info("Starting cycle");
 
     const [balance, activeTargets] = await Promise.all([
       this.client.getBalance(),
@@ -163,34 +285,30 @@ export class DMarketTargetBot {
     ]);
 
     const balanceUsd = parseBalanceUsd(balance, config.dmarket.priceInCoins);
-    logger.info("Fetched account context", {
+    this.logger.info("Fetched account context", {
       balanceUsd: roundUsd(balanceUsd),
       activeTargets: activeTargets.length,
     });
 
     const removedTitles = this.stateStore.pruneMissingTargets(activeTargets);
     if (removedTitles.length > 0) {
-      logger.warn("Removed stale state entries", { removedTitles });
+      this.logger.warn("Removed stale state entries", { removedTitles });
     }
 
     const titles = await this.discoverTitlesFromMarket();
     if (titles.length === 0) {
-      logger.warn("No titles discovered in market scan. Skipping cycle.");
+      this.logger.warn("No titles discovered in market scan. Skipping cycle.");
       await this.stateStore.save();
       return;
     }
 
-    logger.info("Market titles discovered", { titles: titles.length });
-    const aggregatedByTitle = await this.fetchAggregatedPricesByTitle(titles);
-    const opportunities = buildOpportunities([...aggregatedByTitle.values()], {
-      strategy: config.strategy,
-      priceInCoins: config.dmarket.priceInCoins,
-    });
+    this.logger.info("Market titles discovered", { titles: titles.length });
+    const opportunities = await this.analyzeTitles(titles);
     const opportunitiesByTitle = new Map(
       opportunities.map((entry) => [entry.title, entry]),
     );
 
-    logger.info("Profit opportunities built", {
+    this.logger.info("Profit opportunities built", {
       candidates: opportunities.length,
       sampleTop: opportunities.slice(0, 5).map((entry) => ({
         title: entry.title,
@@ -211,7 +329,7 @@ export class DMarketTargetBot {
       .map((title) => activeTargetsByTitle.get(title))
       .filter(Boolean);
 
-    logger.info("Managed targets loaded", {
+    this.logger.info("Managed targets loaded", {
       managedCount: managedTargets.length,
     });
 
@@ -275,7 +393,7 @@ export class DMarketTargetBot {
     await this.applyCreatePlans(createPlans);
     await this.stateStore.save();
 
-    logger.info("Cycle summary", {
+    this.logger.info("Cycle summary", {
       opportunities: opportunities.length,
       updatesPlanned: updateActions.filter((a) => a.type === "replace").length,
       deletesPlanned: updateActions.filter((a) => a.type === "delete").length,
@@ -292,7 +410,7 @@ export class DMarketTargetBot {
     const replaceActions = actions.filter((action) => action.type === "replace");
 
     for (const action of keepActions) {
-      logger.info("Target is on top or near-optimal", {
+      this.logger.info("Target is on top or near-optimal", {
         title: action.title,
         targetId: action.targetId,
         priceUsd: action.priceUsd,
@@ -301,7 +419,7 @@ export class DMarketTargetBot {
 
     if (deleteActions.length > 0) {
       const ids = deleteActions.map((action) => action.targetId);
-      logger.info("Deleting unprofitable managed targets", {
+      this.logger.info("Deleting unprofitable managed targets", {
         count: ids.length,
       });
 
@@ -317,7 +435,7 @@ export class DMarketTargetBot {
     }
 
     for (const action of replaceActions) {
-      logger.info("Replacing managed target price", {
+      this.logger.info("Replacing managed target price", {
         title: action.title,
         oldPriceUsd: action.oldPriceUsd,
         newPriceUsd: action.newPriceUsd,
@@ -355,7 +473,7 @@ export class DMarketTargetBot {
 
       const result = createResponse?.Result?.[0];
       if (!result?.Successful || !result?.TargetID) {
-        logger.error("Failed to recreate target after delete", {
+        this.logger.error("Failed to recreate target after delete", {
           title: action.title,
           result,
         });
@@ -378,7 +496,7 @@ export class DMarketTargetBot {
 
   async applyCreatePlans(createPlans) {
     for (const plan of createPlans) {
-      logger.info("Creating new profitable target", {
+      this.logger.info("Creating new profitable target", {
         title: plan.title,
         amount: plan.amount,
         priceUsd: plan.priceUsd,
@@ -415,7 +533,7 @@ export class DMarketTargetBot {
 
       const result = response?.Result?.[0];
       if (!result?.Successful || !result?.TargetID) {
-        logger.error("Target creation failed", {
+        this.logger.error("Target creation failed", {
           title: plan.title,
           result,
         });
@@ -437,29 +555,3 @@ export class DMarketTargetBot {
     }
   }
 }
-
-async function main() {
-  const bot = new DMarketTargetBot();
-  await bot.start();
-
-  const shutdown = async (signal) => {
-    logger.warn(`Received ${signal}. Stopping bot...`);
-    bot.stop();
-    try {
-      await bot.stateStore.save();
-    } finally {
-      process.exit(0);
-    }
-  };
-
-  process.on("SIGINT", () => shutdown("SIGINT"));
-  process.on("SIGTERM", () => shutdown("SIGTERM"));
-}
-
-main().catch((error) => {
-  logger.error("Bot startup failed", {
-    message: error.message,
-    stack: error.stack,
-  });
-  process.exit(1);
-});

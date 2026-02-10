@@ -5,7 +5,8 @@
   "description": "Automated DMarket target bidding bot",
   "main": "src/bot.js",
   "scripts": {
-    "start": "node src/bot.js",
+    "start": "node src/cli.js",
+    "start:auto": "node src/runBot.js",
     "test": "node --test"
   },
   "repository": {
