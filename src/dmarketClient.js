@@ -231,4 +231,26 @@ export class DMarketClient {
       },
     });
   }
+
+  async getLastSales({
+    gameId,
+    title,
+    limit = 200,
+    offset = 0,
+    filters,
+    txOperationType,
+  }) {
+    return this.request({
+      method: "GET",
+      path: "/trade-aggregator/v1/last-sales",
+      query: {
+        gameId,
+        title,
+        limit: `${limit}`,
+        offset: `${offset}`,
+        filters,
+        txOperationType,
+      },
+    });
+  }
 }

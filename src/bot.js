@@ -32,6 +32,20 @@ function toTargetPayload({ title, amount, priceUsd, currency }) {
   };
 }
 
+function normalizeUnixTimestamp(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  // API may return seconds or milliseconds depending on endpoint version.
+  if (parsed > 1_000_000_000_000) {
+    return Math.floor(parsed / 1000);
+  }
+
+  return Math.floor(parsed);
+}
+
 export class DMarketTargetBot {
   constructor({ loggerInstance = logger } = {}) {
     this.logger = loggerInstance;
@@ -179,8 +193,100 @@ export class DMarketTargetBot {
     const aggregatedByTitle = await this.fetchAggregatedPricesByTitle(uniqueTitles);
     return buildOpportunities([...aggregatedByTitle.values()], {
       strategy: config.strategy,
-      priceInCoins: config.dmarket.priceInCoins,
+      priceInCoins: config.dmarket.aggregatedPricesInCoins,
     });
+  }
+
+  async getMonthlySalesCount(
+    title,
+    { days = 30, pageLimit = 200, maxPages = 10 } = {},
+  ) {
+    const now = Math.floor(Date.now() / 1000);
+    const fromTimestamp = now - days * 24 * 60 * 60;
+
+    let page = 0;
+    let offset = 0;
+    let count = 0;
+
+    while (page < maxPages) {
+      const response = await this.client.getLastSales({
+        gameId: config.bot.gameId,
+        title,
+        limit: pageLimit,
+        offset,
+      });
+
+      const sales = response?.sales || [];
+      if (sales.length === 0) {
+        break;
+      }
+
+      let sawOlderSale = false;
+      for (const sale of sales) {
+        const ts = normalizeUnixTimestamp(sale?.date);
+        if (ts === null) {
+          continue;
+        }
+
+        if (ts >= fromTimestamp) {
+          count += 1;
+        } else {
+          sawOlderSale = true;
+        }
+      }
+
+      if (sawOlderSale || sales.length < pageLimit) {
+        break;
+      }
+
+      page += 1;
+      offset += pageLimit;
+    }
+
+    return count;
+  }
+
+  async filterOpportunitiesByMonthlySales(
+    opportunities,
+    {
+      minSalesPerMonth = config.bot.analysisMinMonthlySales,
+      concurrency = config.bot.analysisSalesConcurrency,
+      days = 30,
+    } = {},
+  ) {
+    const safeConcurrency = Math.max(1, Math.floor(concurrency));
+    const enriched = [];
+    let index = 0;
+
+    const worker = async () => {
+      while (true) {
+        const currentIndex = index;
+        index += 1;
+        if (currentIndex >= opportunities.length) {
+          return;
+        }
+
+        const opportunity = opportunities[currentIndex];
+        const monthlySales = await this.getMonthlySalesCount(opportunity.title, {
+          days,
+        });
+
+        if (monthlySales >= minSalesPerMonth) {
+          enriched.push({
+            ...opportunity,
+            monthlySales,
+          });
+        }
+      }
+    };
+
+    const workers = [];
+    for (let i = 0; i < safeConcurrency; i += 1) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    return enriched;
   }
 
   async createTargetsForOpportunities(

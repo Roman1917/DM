@@ -63,7 +63,13 @@ export const config = {
     authorization: getOptional("DMARKET_AUTHORIZATION"),
     requestTimeoutMs: getNumber("DMARKET_REQUEST_TIMEOUT_MS", 20_000),
     maxRetries: getNumber("DMARKET_MAX_RETRIES", 3),
+    // Balance endpoint returns coins (cents for USD, dimoshi for DMC)
     priceInCoins: getBoolean("DMARKET_PRICE_IN_COINS", true),
+    // Aggregated prices are usually already in USD units
+    aggregatedPricesInCoins: getBoolean(
+      "DMARKET_AGGREGATED_PRICES_IN_COINS",
+      false,
+    ),
   },
   bot: {
     intervalMinutes,
@@ -75,6 +81,13 @@ export const config = {
       getString("BOT_STATE_PATH", "data/managed-targets.json"),
     ),
     dryRun: getBoolean("BOT_DRY_RUN", false),
+    analysisOutputPath: path.resolve(
+      process.cwd(),
+      getString("ANALYSIS_OUTPUT_PATH", "data/opportunities-report.txt"),
+    ),
+    analysisMinTargetPriceUsd: getNumber("ANALYSIS_MIN_TARGET_PRICE_USD", 10),
+    analysisMinMonthlySales: getNumber("ANALYSIS_MIN_MONTHLY_SALES", 10),
+    analysisSalesConcurrency: getNumber("ANALYSIS_SALES_CONCURRENCY", 5),
   },
   strategy: {
     // Marketplace scan controls

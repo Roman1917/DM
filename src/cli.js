@@ -9,10 +9,7 @@ import { logger } from "./logger.js";
 import { ensureParentDirectory, roundUsd } from "./utils.js";
 
 const DEFAULT_TITLES_PATH = path.resolve(process.cwd(), "data/market-titles.txt");
-const DEFAULT_ANALYSIS_PATH = path.resolve(
-  process.cwd(),
-  "data/opportunities-latest.json",
-);
+const DEFAULT_ANALYSIS_PATH = config.bot.analysisOutputPath;
 
 function resolveUserPath(userInput, fallbackAbsolutePath) {
   const value = userInput.trim();
@@ -52,6 +49,7 @@ function printOpportunitiesTable(opportunities, limit = 50) {
     expectedSellUsd: roundUsd(entry.expectedSellUsd),
     profitUsd: roundUsd(entry.profitUsd),
     roiPct: roundUsd(entry.roiPct),
+    monthlySales: entry.monthlySales ?? "-",
     offers: entry.offerCount,
     orders: entry.orderCount,
   }));
@@ -71,7 +69,7 @@ function printMenu() {
   console.log(`
 ================ DMarket Bot Menu ================
 1 - Скан всей площадки и запись названий в файл
-2 - Анализ вещей из файла (target/order/прибыль/ROI)
+2 - Анализ из файла + отчет (title-target-order-ROI, фильтры >=10$/>=10 продаж/мес)
 3 - Выставление таргетов на самые выгодные вещи из файла
 4 - Авто-обновление таргетов каждые 15 минут
 5 - Диагностика API и состояния
@@ -122,7 +120,7 @@ async function handleOptionAnalyzeFromFile(rl, bot) {
   );
   const limitInput = await rl.question("Сколько строк показать в таблице [50]: ");
   const outputFileInput = await rl.question(
-    `Куда сохранить полный JSON-анализ [${DEFAULT_ANALYSIS_PATH}]: `,
+    `Куда сохранить отчет [${DEFAULT_ANALYSIS_PATH}]: `,
   );
 
   const titlesFilePath = resolveUserPath(fileInput, DEFAULT_TITLES_PATH);
@@ -141,30 +139,41 @@ async function handleOptionAnalyzeFromFile(rl, bot) {
   }
 
   const opportunities = await bot.analyzeTitles(titles);
-  await ensureParentDirectory(outputPath);
-  await fs.writeFile(
-    outputPath,
-    `${JSON.stringify(
-      {
-        generatedAt: new Date().toISOString(),
-        sourceFile: titlesFilePath,
-        inputTitles: titles.length,
-        profitableCandidates: opportunities.length,
-        opportunities,
-      },
-      null,
-      2,
-    )}\n`,
-    "utf8",
+  const byTargetPrice = opportunities.filter(
+    (entry) => entry.targetPriceUsd >= config.bot.analysisMinTargetPriceUsd,
   );
+  const filteredBySales = await bot.filterOpportunitiesByMonthlySales(
+    byTargetPrice,
+    {
+      minSalesPerMonth: config.bot.analysisMinMonthlySales,
+      concurrency: config.bot.analysisSalesConcurrency,
+    },
+  );
+  const finalReport = [...filteredBySales].sort((a, b) => {
+    if (b.roiPct !== a.roiPct) {
+      return b.roiPct - a.roiPct;
+    }
+    return b.profitUsd - a.profitUsd;
+  });
+
+  const lines = finalReport.map(
+    (entry) =>
+      `${entry.title} - ${roundUsd(entry.targetPriceUsd).toFixed(2)}$ - ${roundUsd(
+        entry.orderBestUsd,
+      ).toFixed(2)}$ - ${roundUsd(entry.roiPct).toFixed(2)}%`,
+  );
+  await ensureParentDirectory(outputPath);
+  await fs.writeFile(outputPath, `${lines.join("\n")}\n`, "utf8");
 
   // eslint-disable-next-line no-console
   console.log(
-    `Проанализировано: ${titles.length} titles, прибыльных: ${opportunities.length}`,
+    `Проанализировано: ${titles.length}, после фильтра target>=${config.bot.analysisMinTargetPriceUsd}$: ${byTargetPrice.length}, после фильтра продаж>=${config.bot.analysisMinMonthlySales}/мес: ${finalReport.length}`,
   );
-  printOpportunitiesTable(opportunities, printLimit);
+  printOpportunitiesTable(finalReport, printLimit);
   // eslint-disable-next-line no-console
-  console.log(`Полный отчет сохранен: ${outputPath}`);
+  console.log(
+    `Отчет сохранен: ${outputPath}. Формат: название - цена таргета - цена ордера - процент выгоды`,
+  );
 }
 
 async function handleOptionCreateTargets(rl, bot) {
