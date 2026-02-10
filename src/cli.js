@@ -67,8 +67,9 @@ function printOpportunitiesTable(opportunities, limit = 50) {
 function toAnalysisRow(entry) {
   const maxTargetUsd = roundUsd(entry.maxTargetUsd ?? entry.targetPriceUsd);
   const minOfferUsd = roundUsd(entry.offerBestUsd);
-  const edgePct =
-    minOfferUsd > 0
+  const edgePct = Number.isFinite(Number(entry.roiPct))
+    ? roundUsd(Number(entry.roiPct))
+    : minOfferUsd > 0
       ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
       : 0;
 
@@ -143,7 +144,7 @@ function printMenu() {
   console.log(`
 ================ DMarket Bot Menu ================
 1 - Скан всей площадки и запись названий в файл
-2 - Анализ из файла + отчет (max target/min offer/выгода, фильтры >30$/>=10 продаж)
+2 - Авто-анализ ВСЕХ вещей из data/market-titles.txt (без ввода) + отчет
 3 - Выставление таргетов на самые выгодные вещи из файла
 4 - Авто-обновление таргетов каждые 15 минут
 5 - Диагностика API и состояния
@@ -203,22 +204,15 @@ async function handleOptionScanTitles(rl, bot) {
   );
 }
 
-async function handleOptionAnalyzeFromFile(rl, bot) {
-  const fileInput = await rl.question(
-    `Файл с названиями [${DEFAULT_TITLES_PATH}]: `,
-  );
-  const limitInput = await rl.question("Сколько строк показать в таблице [50]: ");
-  const outputFileInput = await rl.question(
-    `Куда сохранить отчет [${DEFAULT_ANALYSIS_PATH}]: `,
-  );
+async function handleOptionAnalyzeFromFile(bot) {
+  const titlesFilePath = DEFAULT_TITLES_PATH;
+  const outputPath = DEFAULT_ANALYSIS_PATH;
+  const printLimit = 50;
 
-  const titlesFilePath = resolveUserPath(fileInput, DEFAULT_TITLES_PATH);
-  const outputPath = resolveUserPath(outputFileInput, DEFAULT_ANALYSIS_PATH);
-  const printLimit = limitInput.trim() ? Number.parseInt(limitInput.trim(), 10) : 50;
-
-  if (!Number.isFinite(printLimit) || printLimit <= 0) {
-    throw new Error("Лимит отображения должен быть положительным числом.");
-  }
+  // eslint-disable-next-line no-console
+  console.log(
+    `Пункт 2: авто-анализ без ввода. Источник: ${titlesFilePath}, отчет: ${outputPath}`,
+  );
 
   const titles = await loadTitlesFromFile(titlesFilePath);
   if (titles.length === 0) {
@@ -238,10 +232,7 @@ async function handleOptionAnalyzeFromFile(rl, bot) {
       concurrency: config.bot.analysisSalesConcurrency,
     },
   );
-  const analysisRows = filteredBySales
-    .map((entry) => toAnalysisRow(entry))
-    .filter((entry) => entry.edgePct > 0)
-    .sort((a, b) => {
+  const analysisRows = filteredBySales.map((entry) => toAnalysisRow(entry)).sort((a, b) => {
       if (b.edgePct !== a.edgePct) {
         return b.edgePct - a.edgePct;
       }
@@ -380,7 +371,7 @@ async function menuLoop() {
         if (choice === "1") {
           await handleOptionScanTitles(rl, bot);
         } else if (choice === "2") {
-          await handleOptionAnalyzeFromFile(rl, bot);
+          await handleOptionAnalyzeFromFile(bot);
         } else if (choice === "3") {
           await handleOptionCreateTargets(rl, bot);
         } else if (choice === "4") {
