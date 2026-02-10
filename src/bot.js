@@ -259,9 +259,15 @@ class DMarketTargetBot {
       newTargetsPerCycle: Math.min(config.strategy.newTargetsPerCycle, freeSlots),
     };
 
+    const occupiedTitles = [
+      ...new Set(
+        refreshedActiveTargets.map((target) => target?.Title).filter(Boolean),
+      ),
+    ];
+
     const createPlans = planNewTargets({
       opportunities,
-      managedTitles: currentManagedTitles,
+      managedTitles: occupiedTitles,
       strategy: strategyForNew,
       availableBudgetUsd,
     });
