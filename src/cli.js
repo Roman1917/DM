@@ -179,7 +179,22 @@ async function handleOptionScanTitles(rl, bot) {
     throw new Error("Размер страницы должен быть положительным числом.");
   }
 
-  const titles = await bot.discoverTitlesFromMarket({ maxPages, pageSize });
+  // eslint-disable-next-line no-console
+  console.log(
+    `Старт сканирования: до ${maxPages} страниц, размер страницы ${pageSize}. Прогресс будет печататься каждые 10 страниц...`,
+  );
+
+  const titles = await bot.discoverTitlesFromMarket({
+    maxPages,
+    pageSize,
+    progressEveryPages: 10,
+    onProgress: ({ page, maxPages: total, titlesFound, hasNextPage }) => {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[scan] Страница ${page}/${total} | titles: ${titlesFound} | next: ${hasNextPage ? "yes" : "no"}`,
+      );
+    },
+  });
   const storedTitles = await saveTitlesToFile(titlesFilePath, titles);
 
   // eslint-disable-next-line no-console

@@ -243,6 +243,8 @@ export class DMarketTargetBot {
   async discoverTitlesFromMarket({
     maxPages = config.strategy.scanPages,
     pageSize = config.strategy.pageSize,
+    progressEveryPages = 0,
+    onProgress = null,
   } = {}) {
     let cursor = "";
     let page = 0;
@@ -265,6 +267,18 @@ export class DMarketTargetBot {
 
       page += 1;
       const nextCursor = response?.cursor;
+      if (
+        typeof onProgress === "function" &&
+        progressEveryPages > 0 &&
+        page % progressEveryPages === 0
+      ) {
+        onProgress({
+          page,
+          maxPages,
+          titlesFound: titles.size,
+          hasNextPage: Boolean(nextCursor && nextCursor !== cursor),
+        });
+      }
       if (!nextCursor || nextCursor === cursor) {
         break;
       }
