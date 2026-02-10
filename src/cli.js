@@ -375,11 +375,15 @@ async function handleOptionDiagnostics(bot) {
   // eslint-disable-next-line no-console
   console.log(`Title: ${item.title}`);
   // eslint-disable-next-line no-console
-  console.log(`Max target: $${roundUsd(item.maxTargetUsd).toFixed(2)}`);
+  console.log(`Target price: $${roundUsd(item.maxTargetUsd).toFixed(2)}`);
   // eslint-disable-next-line no-console
-  console.log(`Best order: $${roundUsd(item.orderBestUsd).toFixed(2)}`);
+  console.log(`Order price: $${roundUsd(item.minOfferUsd).toFixed(2)}`);
   // eslint-disable-next-line no-console
-  console.log(`Min offer: $${roundUsd(item.minOfferUsd).toFixed(2)}`);
+  console.log(
+    `Edge: ${roundUsd(
+      ((item.maxTargetUsd - item.minOfferUsd) / item.minOfferUsd) * 100,
+    ).toFixed(2)}%`,
+  );
   // eslint-disable-next-line no-console
   console.log(`ROI: ${roundUsd(item.roiPct).toFixed(2)}%`);
 }

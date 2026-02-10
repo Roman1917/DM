@@ -10,8 +10,6 @@ import {
 } from "./strategy.js";
 import {
   chunkArray,
-  floorUsd,
-  maxTargetByProfitability,
   parseNumber,
   roundUsd,
   toUsd,
@@ -361,7 +359,7 @@ export class DMarketTargetBot {
         raw?.Offers?.BestPrice,
         config.dmarket.aggregatedPricesInCoins,
       );
-      const bestOrderUsd =
+      const bestTargetUsd =
         toUsd(raw?.Orders?.BestPrice, config.dmarket.aggregatedPricesInCoins) || 0;
       const offerCount = parseNumber(raw?.Offers?.Count) || 0;
       const orderCount = parseNumber(raw?.Orders?.Count) || 0;
@@ -370,46 +368,20 @@ export class DMarketTargetBot {
         continue;
       }
 
-      const expectedSellUsd =
-        minOfferUsd * (1 - config.strategy.quickSaleDiscountPct / 100);
-      const rawMaxTargetUsd = maxTargetByProfitability({
-        expectedSellUsd,
-        saleCommissionPct: config.strategy.saleCommissionPct,
-        minProfitUsd: config.strategy.minProfitUsd,
-        minRoiPct: config.strategy.minRoiPct,
-      });
-      const maxTargetUsd = floorUsd(Math.max(0, rawMaxTargetUsd || 0));
-
-      const bidToBeatUsd =
-        bestOrderUsd > 0
-          ? bestOrderUsd + config.strategy.bidStepUsd
-          : minOfferUsd * config.strategy.noOrderBidRatio;
-      const targetPriceUsd = floorUsd(
-        Math.max(
-          config.strategy.minBuyPriceUsd,
-          Math.min(maxTargetUsd || config.strategy.minBuyPriceUsd, bidToBeatUsd),
-        ),
-      );
-
-      const netSellUsd =
-        expectedSellUsd * (1 - config.strategy.saleCommissionPct / 100);
+      const maxTargetUsd = roundUsd(bestTargetUsd);
       const edgePct =
         minOfferUsd > 0
           ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
           : 0;
-      const roiPct =
-        targetPriceUsd > 0
-          ? roundUsd(((netSellUsd - targetPriceUsd) / targetPriceUsd) * 100)
-          : 0;
+      const roiPct = edgePct;
 
       rows.push({
         title,
-        maxTargetUsd: roundUsd(maxTargetUsd),
+        maxTargetUsd,
         minOfferUsd: roundUsd(minOfferUsd),
-        targetPriceUsd: roundUsd(targetPriceUsd),
-        orderBestUsd: roundUsd(bestOrderUsd),
-        expectedSellUsd: roundUsd(expectedSellUsd),
-        netSellUsd: roundUsd(netSellUsd),
+        targetPriceUsd: maxTargetUsd,
+        orderBestUsd: roundUsd(minOfferUsd),
+        targetBestUsd: maxTargetUsd,
         edgePct,
         roiPct,
         offerCount,
