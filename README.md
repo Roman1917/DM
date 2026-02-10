@@ -78,6 +78,8 @@ cp .env.example .env
 
 - `DMARKET_AGGREGATED_PRICES_IN_COINS`  
   (обычно должно быть `false`).
+- `DMARKET_TARGETS_BY_TITLE_PRICES_IN_COINS`  
+  (обычно должно быть `true`).
 
 Чтобы снизить шанс `429 Too Many Requests`, регулируйте:
 

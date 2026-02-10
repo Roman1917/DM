@@ -311,6 +311,42 @@ function extractOrderPriceUsd(order, priceInCoins) {
   return toUsd(raw, priceInCoins);
 }
 
+function normalizeTargetRangeByOffer({
+  minTargetUsd,
+  maxTargetUsd,
+  minOfferUsd,
+}) {
+  if (
+    !Number.isFinite(maxTargetUsd) ||
+    !Number.isFinite(minOfferUsd) ||
+    minOfferUsd <= 0
+  ) {
+    return {
+      minTargetUsd,
+      maxTargetUsd,
+      scaleAdjusted: false,
+    };
+  }
+
+  const suspiciousScale =
+    maxTargetUsd >= 1_000 && maxTargetUsd / minOfferUsd >= 8;
+  if (!suspiciousScale) {
+    return {
+      minTargetUsd,
+      maxTargetUsd,
+      scaleAdjusted: false,
+    };
+  }
+
+  return {
+    minTargetUsd: Number.isFinite(minTargetUsd)
+      ? roundUsd(minTargetUsd / 100)
+      : minTargetUsd,
+    maxTargetUsd: roundUsd(maxTargetUsd / 100),
+    scaleAdjusted: true,
+  };
+}
+
 export class DMarketTargetBot {
   constructor({ loggerInstance = logger } = {}) {
     this.logger = loggerInstance;
@@ -622,23 +658,34 @@ export class DMarketTargetBot {
         }
 
         const maxTargetUsd = targetStats.maxTargetUsd;
-        const minTargetUsd = Number.isFinite(targetStats.minTargetUsd)
+        let minTargetUsd = Number.isFinite(targetStats.minTargetUsd)
           ? targetStats.minTargetUsd
           : targetStats.maxTargetUsd;
+        let normalizedMaxTargetUsd = maxTargetUsd;
+
+        const normalizedRange = normalizeTargetRangeByOffer({
+          minTargetUsd,
+          maxTargetUsd,
+          minOfferUsd,
+        });
+        minTargetUsd = normalizedRange.minTargetUsd;
+        normalizedMaxTargetUsd = normalizedRange.maxTargetUsd;
         const edgePct =
           minOfferUsd > 0
-            ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
+            ? roundUsd(
+                ((normalizedMaxTargetUsd - minOfferUsd) / minOfferUsd) * 100,
+              )
             : 0;
         const roiPct = edgePct;
 
         rows[currentIndex] = {
           title,
-          maxTargetUsd,
+          maxTargetUsd: normalizedMaxTargetUsd,
           minTargetUsd,
           minOfferUsd: roundUsd(minOfferUsd),
-          targetPriceUsd: maxTargetUsd,
+          targetPriceUsd: normalizedMaxTargetUsd,
           orderBestUsd: roundUsd(minOfferUsd),
-          targetBestUsd: maxTargetUsd,
+          targetBestUsd: normalizedMaxTargetUsd,
           edgePct,
           roiPct,
           offerCount,
@@ -646,6 +693,7 @@ export class DMarketTargetBot {
           targetSource: targetStats.selectedSource,
           targetOrdersCount: targetStats.totalOrdersCount,
           targetStrictAnyOrdersCount: targetStats.strictAnyOrdersCount,
+          targetScaleAdjusted: normalizedRange.scaleAdjusted,
           rawTargetsByTitle: targetStats.rawResponse,
         };
 

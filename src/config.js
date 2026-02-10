@@ -72,7 +72,7 @@ export const config = {
     ),
     targetsByTitlePricesInCoins: getBoolean(
       "DMARKET_TARGETS_BY_TITLE_PRICES_IN_COINS",
-      false,
+      true,
     ),
     requestMinIntervalMs: getNumber("DMARKET_REQUEST_MIN_INTERVAL_MS", 300),
     requestJitterMs: getNumber("DMARKET_REQUEST_JITTER_MS", 120),
