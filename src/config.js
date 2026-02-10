@@ -1,5 +1,5 @@
-const path = require("path");
-const dotenv = require("dotenv");
+import path from "node:path";
+import dotenv from "dotenv";
 
 dotenv.config();
 
@@ -21,7 +21,7 @@ function getString(name, fallback) {
   return value.trim();
 }
 
-function getNumber(name, fallback) {
+export function getNumber(name, fallback) {
   const value = process.env[name];
   if (value === undefined || value === null || value.trim() === "") {
     return fallback;
@@ -35,7 +35,7 @@ function getNumber(name, fallback) {
   return parsed;
 }
 
-function getBoolean(name, fallback) {
+export function getBoolean(name, fallback) {
   const value = process.env[name];
   if (value === undefined || value === null || value.trim() === "") {
     return fallback;
@@ -55,7 +55,7 @@ function getOptional(name) {
 
 const intervalMinutes = getNumber("BOT_INTERVAL_MINUTES", 15);
 
-const config = {
+export const config = {
   dmarket: {
     baseUrl: getString("DMARKET_BASE_URL", "https://api.dmarket.com"),
     apiKey: getRequired("DMARKET_API_KEY"),
@@ -110,10 +110,4 @@ const config = {
       0.005,
     ),
   },
-};
-
-module.exports = {
-  config,
-  getBoolean,
-  getNumber,
 };

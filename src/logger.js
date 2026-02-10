@@ -13,7 +13,7 @@ function log(level, message, meta = {}) {
   console.log(line);
 }
 
-const logger = {
+export const logger = {
   info(message, meta) {
     log("INFO", message, meta);
   },
@@ -26,8 +26,4 @@ const logger = {
   debug(message, meta) {
     log("DEBUG", message, meta);
   },
-};
-
-module.exports = {
-  logger,
 };

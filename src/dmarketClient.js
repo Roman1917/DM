@@ -1,6 +1,6 @@
-const nacl = require("tweetnacl");
+import nacl from "tweetnacl";
 
-const { buildQuery, fromHex, sleep, toHex } = require("./utils");
+import { buildQuery, fromHex, sleep, toHex } from "./utils.js";
 
 function buildSigningKey(secretKeyHex) {
   const raw = fromHex(secretKeyHex);
@@ -18,7 +18,7 @@ function buildSigningKey(secretKeyHex) {
   );
 }
 
-class DMarketClient {
+export class DMarketClient {
   constructor({ config, logger }) {
     this.config = config;
     this.logger = logger;
@@ -232,7 +232,3 @@ class DMarketClient {
     });
   }
 }
-
-module.exports = {
-  DMarketClient,
-};

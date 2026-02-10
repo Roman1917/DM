@@ -1,15 +1,15 @@
-const fs = require("fs/promises");
-const path = require("path");
+import fs from "node:fs/promises";
+import path from "node:path";
 
-function sleep(ms) {
+export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function toHex(bytes) {
+export function toHex(bytes) {
   return Buffer.from(bytes).toString("hex");
 }
 
-function fromHex(hexString) {
+export function fromHex(hexString) {
   const normalized = hexString.trim().toLowerCase();
   if (!/^[0-9a-f]+$/.test(normalized) || normalized.length % 2 !== 0) {
     throw new Error("Hex string is invalid.");
@@ -18,7 +18,7 @@ function fromHex(hexString) {
   return new Uint8Array(Buffer.from(normalized, "hex"));
 }
 
-function buildQuery(params) {
+export function buildQuery(params) {
   const pairs = [];
 
   for (const [key, value] of Object.entries(params || {})) {
@@ -43,7 +43,7 @@ function buildQuery(params) {
   return pairs.join("&");
 }
 
-function parseNumber(value) {
+export function parseNumber(value) {
   if (value === undefined || value === null) {
     return null;
   }
@@ -56,7 +56,7 @@ function parseNumber(value) {
   return parsed;
 }
 
-function toUsd(value, priceInCoins) {
+export function toUsd(value, priceInCoins) {
   const amount = parseNumber(value);
   if (amount === null) {
     return null;
@@ -69,11 +69,11 @@ function toUsd(value, priceInCoins) {
   return amount;
 }
 
-function roundUsd(value) {
+export function roundUsd(value) {
   return Number(Number(value).toFixed(2));
 }
 
-function maxTargetByProfitability({
+export function maxTargetByProfitability({
   expectedSellUsd,
   saleCommissionPct,
   minProfitUsd,
@@ -88,7 +88,7 @@ function maxTargetByProfitability({
   return Math.min(byAbsoluteProfit, byRoi);
 }
 
-function ensurePositiveNumber(value, fallback) {
+export function ensurePositiveNumber(value, fallback) {
   const parsed = parseNumber(value);
   if (parsed === null || parsed <= 0) {
     return fallback;
@@ -97,7 +97,7 @@ function ensurePositiveNumber(value, fallback) {
   return parsed;
 }
 
-function chunkArray(items, chunkSize) {
+export function chunkArray(items, chunkSize) {
   const safeChunkSize = Math.max(1, Math.floor(chunkSize));
   const result = [];
 
@@ -108,21 +108,7 @@ function chunkArray(items, chunkSize) {
   return result;
 }
 
-async function ensureParentDirectory(filePath) {
+export async function ensureParentDirectory(filePath) {
   const dirPath = path.dirname(filePath);
   await fs.mkdir(dirPath, { recursive: true });
 }
-
-module.exports = {
-  sleep,
-  toHex,
-  fromHex,
-  buildQuery,
-  parseNumber,
-  toUsd,
-  roundUsd,
-  maxTargetByProfitability,
-  ensurePositiveNumber,
-  chunkArray,
-  ensureParentDirectory,
-};

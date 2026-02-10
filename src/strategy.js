@@ -1,11 +1,11 @@
-const {
+import {
   maxTargetByProfitability,
   parseNumber,
   roundUsd,
   toUsd,
-} = require("./utils");
+} from "./utils.js";
 
-function parseTargetPriceUsd(target) {
+export function parseTargetPriceUsd(target) {
   const amount = parseNumber(target?.Price?.Amount);
   if (amount === null) {
     return null;
@@ -125,7 +125,7 @@ function evaluateOpportunity(normalized, strategy) {
   };
 }
 
-function buildOpportunities(aggregatedTitles, { strategy, priceInCoins }) {
+export function buildOpportunities(aggregatedTitles, { strategy, priceInCoins }) {
   return aggregatedTitles
     .map((entry) => normalizeAggregatedTitle(entry, { priceInCoins }))
     .map((normalized) => evaluateOpportunity(normalized, strategy))
@@ -133,7 +133,7 @@ function buildOpportunities(aggregatedTitles, { strategy, priceInCoins }) {
     .sort((a, b) => b.score - a.score);
 }
 
-function planManagedUpdates({
+export function planManagedUpdates({
   managedTargets,
   opportunitiesByTitle,
   strategy,
@@ -190,7 +190,7 @@ function planManagedUpdates({
   return actions;
 }
 
-function planNewTargets({
+export function planNewTargets({
   opportunities,
   managedTitles,
   strategy,
@@ -234,10 +234,3 @@ function planNewTargets({
 
   return plans;
 }
-
-module.exports = {
-  buildOpportunities,
-  planManagedUpdates,
-  planNewTargets,
-  parseTargetPriceUsd,
-};

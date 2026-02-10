@@ -1,14 +1,14 @@
-const { config } = require("./config");
-const { DMarketClient } = require("./dmarketClient");
-const { logger } = require("./logger");
-const { StateStore } = require("./stateStore");
-const {
+import { config } from "./config.js";
+import { DMarketClient } from "./dmarketClient.js";
+import { logger } from "./logger.js";
+import { StateStore } from "./stateStore.js";
+import {
   buildOpportunities,
   parseTargetPriceUsd,
   planManagedUpdates,
   planNewTargets,
-} = require("./strategy");
-const { chunkArray, parseNumber, roundUsd, toUsd } = require("./utils");
+} from "./strategy.js";
+import { chunkArray, parseNumber, roundUsd, toUsd } from "./utils.js";
 
 function parseBalanceUsd(balance, priceInCoins) {
   const rawValue =
@@ -32,7 +32,7 @@ function toTargetPayload({ title, amount, priceUsd, currency }) {
   };
 }
 
-class DMarketTargetBot {
+export class DMarketTargetBot {
   constructor() {
     this.client = new DMarketClient({
       config: config.dmarket,

@@ -1,13 +1,13 @@
-const fs = require("fs/promises");
+import fs from "node:fs/promises";
 
-const { ensureParentDirectory } = require("./utils");
+import { ensureParentDirectory } from "./utils.js";
 
 const DEFAULT_STATE = {
   version: 1,
   managedByTitle: {},
 };
 
-class StateStore {
+export class StateStore {
   constructor(statePath) {
     this.statePath = statePath;
     this.state = structuredClone(DEFAULT_STATE);
@@ -100,7 +100,3 @@ class StateStore {
     await fs.rename(tempFile, this.statePath);
   }
 }
-
-module.exports = {
-  StateStore,
-};

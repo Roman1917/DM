@@ -1,11 +1,11 @@
-const test = require("node:test");
-const assert = require("node:assert/strict");
+import test from "node:test";
+import assert from "node:assert/strict";
 
-const {
+import {
   buildOpportunities,
   planManagedUpdates,
   planNewTargets,
-} = require("../src/strategy");
+} from "../src/strategy.js";
 
 const baseStrategy = {
   saleCommissionPct: 2,

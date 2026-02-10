@@ -1,6 +1,7 @@
 {
   "name": "dmarket-target-bot",
   "version": "1.0.0",
+  "type": "module",
   "description": "Automated DMarket target bidding bot",
   "main": "src/bot.js",
   "scripts": {
