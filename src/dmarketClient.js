@@ -257,6 +257,13 @@ export class DMarketClient {
     });
   }
 
+  async getTargetsByTitle({ gameId, title }) {
+    return this.request({
+      method: "GET",
+      path: `/marketplace-api/v1/targets-by-title/${encodeURIComponent(gameId)}/${encodeURIComponent(title)}`,
+    });
+  }
+
   async getLastSales({
     gameId,
     title,

@@ -70,6 +70,10 @@ export const config = {
       "DMARKET_AGGREGATED_PRICES_IN_COINS",
       false,
     ),
+    targetsByTitlePricesInCoins: getBoolean(
+      "DMARKET_TARGETS_BY_TITLE_PRICES_IN_COINS",
+      false,
+    ),
     requestMinIntervalMs: getNumber("DMARKET_REQUEST_MIN_INTERVAL_MS", 300),
     requestJitterMs: getNumber("DMARKET_REQUEST_JITTER_MS", 120),
   },
@@ -90,6 +94,7 @@ export const config = {
     analysisMinTargetPriceUsd: getNumber("ANALYSIS_MIN_TARGET_PRICE_USD", 30),
     analysisMinMonthlySales: getNumber("ANALYSIS_MIN_MONTHLY_SALES", 10),
     analysisSalesConcurrency: getNumber("ANALYSIS_SALES_CONCURRENCY", 1),
+    analysisTargetsConcurrency: getNumber("ANALYSIS_TARGETS_CONCURRENCY", 1),
   },
   strategy: {
     // Marketplace scan controls

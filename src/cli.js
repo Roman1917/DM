@@ -369,6 +369,18 @@ async function handleOptionDiagnostics(bot) {
     limit: 1,
     offset: 0,
   });
+  const rawTargetsByTitleResponse = await bot.client
+    .getTargetsByTitle({
+      gameId: config.bot.gameId,
+      title,
+    })
+    .catch((error) => ({
+      __error: {
+        message: error.message,
+        status: error.status,
+        payload: error.payload,
+      },
+    }));
   const pricing = await bot.analyzeTitlesPricing([title]);
   if (pricing.length === 0) {
     // eslint-disable-next-line no-console
@@ -377,6 +389,10 @@ async function handleOptionDiagnostics(bot) {
     console.log("RAW API response:");
     // eslint-disable-next-line no-console
     console.log(JSON.stringify(rawAggregatedResponse, null, 2));
+    // eslint-disable-next-line no-console
+    console.log("RAW targets-by-title response:");
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(rawTargetsByTitleResponse, null, 2));
     return;
   }
 
@@ -386,13 +402,21 @@ async function handleOptionDiagnostics(bot) {
   // eslint-disable-next-line no-console
   console.log(JSON.stringify(rawAggregatedResponse, null, 2));
   // eslint-disable-next-line no-console
+  console.log(
+    "RAW API response (/marketplace-api/v1/targets-by-title/{game_id}/{title}):",
+  );
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify(rawTargetsByTitleResponse, null, 2));
+  // eslint-disable-next-line no-console
   console.log("RAW parsed pricing object:");
   // eslint-disable-next-line no-console
   console.log(JSON.stringify(item, null, 2));
   // eslint-disable-next-line no-console
   console.log(`Title: ${item.title}`);
   // eslint-disable-next-line no-console
-  console.log(`Target price: $${roundUsd(item.maxTargetUsd).toFixed(2)}`);
+  console.log(`Target max: $${roundUsd(item.maxTargetUsd).toFixed(2)}`);
+  // eslint-disable-next-line no-console
+  console.log(`Target min: $${roundUsd(item.minTargetUsd ?? item.maxTargetUsd).toFixed(2)}`);
   // eslint-disable-next-line no-console
   console.log(`Order price: $${roundUsd(item.minOfferUsd).toFixed(2)}`);
   // eslint-disable-next-line no-console

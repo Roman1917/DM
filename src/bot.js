@@ -172,6 +172,140 @@ function extractSalesArray(response) {
   return [];
 }
 
+function extractTargetOrdersArray(response) {
+  if (!response) {
+    return [];
+  }
+
+  if (Array.isArray(response)) {
+    return response;
+  }
+
+  const directCandidates = [
+    response.orders,
+    response.Orders,
+    response.items,
+    response.Items,
+    response.data?.orders,
+    response.data?.Orders,
+    response.result?.orders,
+    response.result?.Orders,
+  ];
+
+  for (const candidate of directCandidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+  }
+
+  return [];
+}
+
+function normalizeAttributeKey(key) {
+  return String(key || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeAttributesObject(attributes) {
+  if (!attributes) {
+    return {};
+  }
+
+  if (Array.isArray(attributes)) {
+    const out = {};
+    for (const entry of attributes) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+      const key = normalizeAttributeKey(
+        entry.name ?? entry.Name ?? entry.key ?? entry.Key,
+      );
+      if (!key) {
+        continue;
+      }
+      out[key] = entry.value ?? entry.Value ?? entry.val ?? "";
+    }
+    return out;
+  }
+
+  if (typeof attributes === "object") {
+    const out = {};
+    for (const [rawKey, value] of Object.entries(attributes)) {
+      const key = normalizeAttributeKey(rawKey);
+      if (!key) {
+        continue;
+      }
+      out[key] = value;
+    }
+    return out;
+  }
+
+  return {};
+}
+
+function isSpecializedTargetOrder(order) {
+  const attributes = normalizeAttributesObject(
+    order?.attributes ?? order?.Attributes,
+  );
+  const keys = Object.keys(attributes);
+  if (keys.length === 0) {
+    return false;
+  }
+
+  for (const key of keys) {
+    if (
+      key.includes("phase") ||
+      key.includes("seed") ||
+      key.includes("float") ||
+      key.includes("pattern") ||
+      key.includes("paint") ||
+      key.includes("sticker") ||
+      key.includes("gem") ||
+      key.includes("name_tag") ||
+      key.includes("serial")
+    ) {
+      return true;
+    }
+  }
+
+  // Unknown attributes are treated as specialized to avoid inflated target prices.
+  const allowedBasicKeys = new Set([
+    "title",
+    "name",
+    "game_id",
+    "gameid",
+    "quality",
+    "rarity",
+    "exterior",
+    "condition",
+    "wear",
+    "category",
+    "type",
+    "item_type",
+  ]);
+  for (const key of keys) {
+    if (!allowedBasicKeys.has(key)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function extractOrderPriceUsd(order, priceInCoins) {
+  const directPrice = order?.price ?? order?.Price;
+  const nestedPrice =
+    order?.price?.amount ??
+    order?.price?.Amount ??
+    order?.Price?.amount ??
+    order?.Price?.Amount;
+  const raw = directPrice ?? nestedPrice ?? null;
+  return toUsd(raw, priceInCoins);
+}
+
 export class DMarketTargetBot {
   constructor({ loggerInstance = logger } = {}) {
     this.logger = loggerInstance;
@@ -337,7 +471,72 @@ export class DMarketTargetBot {
     });
   }
 
-  async analyzeTitlesPricing(titles) {
+  async getTargetStatsByTitle(title) {
+    try {
+      const response = await this.client.getTargetsByTitle({
+        gameId: config.bot.gameId,
+        title,
+      });
+      const orders = extractTargetOrdersArray(response);
+
+      const allPrices = [];
+      const basePrices = [];
+      for (const order of orders) {
+        const priceUsd = extractOrderPriceUsd(
+          order,
+          config.dmarket.targetsByTitlePricesInCoins,
+        );
+        if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
+          continue;
+        }
+
+        allPrices.push(priceUsd);
+        if (!isSpecializedTargetOrder(order)) {
+          basePrices.push(priceUsd);
+        }
+      }
+
+      const selectedPrices = basePrices.length > 0 ? basePrices : allPrices;
+      const minTargetUsd =
+        selectedPrices.length > 0 ? roundUsd(Math.min(...selectedPrices)) : null;
+      const maxTargetUsd =
+        selectedPrices.length > 0 ? roundUsd(Math.max(...selectedPrices)) : null;
+
+      return {
+        minTargetUsd,
+        maxTargetUsd,
+        rawResponse: response,
+        totalOrdersCount: orders.length,
+        parsedPricesCount: allPrices.length,
+        baseOrdersCount: basePrices.length,
+        selectedSource: basePrices.length > 0 ? "base_orders" : "all_orders_fallback",
+      };
+    } catch (error) {
+      this.logger.warn("Failed to fetch targets-by-title", {
+        title,
+        message: error.message,
+        status: error.status,
+      });
+      return {
+        minTargetUsd: null,
+        maxTargetUsd: null,
+        rawResponse: null,
+        totalOrdersCount: 0,
+        parsedPricesCount: 0,
+        baseOrdersCount: 0,
+        selectedSource: "unavailable",
+      };
+    }
+  }
+
+  async analyzeTitlesPricing(
+    titles,
+    {
+      targetsConcurrency = config.bot.analysisTargetsConcurrency,
+      progressEvery = 0,
+      onProgress = null,
+    } = {},
+  ) {
     const uniqueTitles = [...new Set(titles.map((title) => title.trim()))].filter(
       Boolean,
     );
@@ -347,49 +546,103 @@ export class DMarketTargetBot {
     }
 
     const aggregatedByTitle = await this.fetchAggregatedPricesByTitle(uniqueTitles);
-    const rows = [];
+    const rows = new Array(uniqueTitles.length).fill(null);
+    const safeConcurrency = Math.max(1, Math.floor(targetsConcurrency));
+    let index = 0;
+    let processed = 0;
 
-    for (const title of uniqueTitles) {
-      const raw = aggregatedByTitle.get(title);
-      if (!raw) {
-        continue;
+    const worker = async () => {
+      while (true) {
+        const currentIndex = index;
+        index += 1;
+        if (currentIndex >= uniqueTitles.length) {
+          return;
+        }
+
+        const title = uniqueTitles[currentIndex];
+        const raw = aggregatedByTitle.get(title);
+        if (!raw) {
+          processed += 1;
+          if (
+            typeof onProgress === "function" &&
+            progressEvery > 0 &&
+            processed % progressEvery === 0
+          ) {
+            onProgress({ processed, total: uniqueTitles.length });
+          }
+          continue;
+        }
+
+        const minOfferUsd = toUsd(
+          raw?.Offers?.BestPrice,
+          config.dmarket.aggregatedPricesInCoins,
+        );
+        const aggregatedTargetUsd =
+          toUsd(raw?.Orders?.BestPrice, config.dmarket.aggregatedPricesInCoins) || 0;
+        const offerCount = parseNumber(raw?.Offers?.Count) || 0;
+        const orderCount = parseNumber(raw?.Orders?.Count) || 0;
+
+        if (!Number.isFinite(minOfferUsd) || minOfferUsd <= 0) {
+          processed += 1;
+          if (
+            typeof onProgress === "function" &&
+            progressEvery > 0 &&
+            processed % progressEvery === 0
+          ) {
+            onProgress({ processed, total: uniqueTitles.length });
+          }
+          continue;
+        }
+
+        const targetStats = await this.getTargetStatsByTitle(title);
+        const maxTargetUsd = Number.isFinite(targetStats.maxTargetUsd)
+          ? targetStats.maxTargetUsd
+          : roundUsd(aggregatedTargetUsd);
+        const minTargetUsd = Number.isFinite(targetStats.minTargetUsd)
+          ? targetStats.minTargetUsd
+          : roundUsd(aggregatedTargetUsd);
+        const edgePct =
+          minOfferUsd > 0
+            ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
+            : 0;
+        const roiPct = edgePct;
+
+        rows[currentIndex] = {
+          title,
+          maxTargetUsd,
+          minTargetUsd,
+          minOfferUsd: roundUsd(minOfferUsd),
+          targetPriceUsd: maxTargetUsd,
+          orderBestUsd: roundUsd(minOfferUsd),
+          targetBestUsd: maxTargetUsd,
+          edgePct,
+          roiPct,
+          offerCount,
+          orderCount,
+          targetSource: targetStats.selectedSource,
+          targetOrdersCount: targetStats.totalOrdersCount,
+          targetBaseOrdersCount: targetStats.baseOrdersCount,
+          rawTargetsByTitle: targetStats.rawResponse,
+        };
+
+        processed += 1;
+        if (
+          typeof onProgress === "function" &&
+          progressEvery > 0 &&
+          processed % progressEvery === 0
+        ) {
+          onProgress({ processed, total: uniqueTitles.length });
+        }
       }
+    };
 
-      const minOfferUsd = toUsd(
-        raw?.Offers?.BestPrice,
-        config.dmarket.aggregatedPricesInCoins,
-      );
-      const bestTargetUsd =
-        toUsd(raw?.Orders?.BestPrice, config.dmarket.aggregatedPricesInCoins) || 0;
-      const offerCount = parseNumber(raw?.Offers?.Count) || 0;
-      const orderCount = parseNumber(raw?.Orders?.Count) || 0;
-
-      if (!Number.isFinite(minOfferUsd) || minOfferUsd <= 0) {
-        continue;
-      }
-
-      const maxTargetUsd = roundUsd(bestTargetUsd);
-      const edgePct =
-        minOfferUsd > 0
-          ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
-          : 0;
-      const roiPct = edgePct;
-
-      rows.push({
-        title,
-        maxTargetUsd,
-        minOfferUsd: roundUsd(minOfferUsd),
-        targetPriceUsd: maxTargetUsd,
-        orderBestUsd: roundUsd(minOfferUsd),
-        targetBestUsd: maxTargetUsd,
-        edgePct,
-        roiPct,
-        offerCount,
-        orderCount,
-      });
+    const workers = [];
+    for (let i = 0; i < safeConcurrency; i += 1) {
+      workers.push(worker());
     }
+    await Promise.all(workers);
 
-    return rows;
+    return rows.filter(Boolean);
   }
 
   async getMonthlySalesCount(
