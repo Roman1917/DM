@@ -246,7 +246,25 @@ function normalizeAttributesObject(attributes) {
   return {};
 }
 
-function isSpecializedTargetOrder(order) {
+function normalizeAttributeValue(value) {
+  if (value === undefined || value === null) {
+    return "";
+  }
+
+  return String(value).trim().toLowerCase();
+}
+
+function readAttributeValue(attributes, keys) {
+  for (const key of keys) {
+    if (key in attributes) {
+      return normalizeAttributeValue(attributes[key]);
+    }
+  }
+
+  return "";
+}
+
+function isDefaultAnyTargetOrder(order) {
   const attributes = normalizeAttributesObject(
     order?.attributes ?? order?.Attributes,
   );
@@ -255,44 +273,31 @@ function isSpecializedTargetOrder(order) {
     return false;
   }
 
-  for (const key of keys) {
-    if (
-      key.includes("phase") ||
-      key.includes("seed") ||
-      key.includes("float") ||
-      key.includes("pattern") ||
-      key.includes("paint") ||
-      key.includes("sticker") ||
-      key.includes("gem") ||
-      key.includes("name_tag") ||
-      key.includes("serial")
-    ) {
-      return true;
-    }
+  const phase = readAttributeValue(attributes, ["phase"]);
+  const paintSeed = readAttributeValue(attributes, ["paintseed", "paint_seed"]);
+  const floatPart = readAttributeValue(attributes, [
+    "floatpartvalue",
+    "float_part_value",
+  ]);
+
+  if (phase !== "any" || paintSeed !== "any" || floatPart !== "any") {
+    return false;
   }
 
-  // Unknown attributes are treated as specialized to avoid inflated target prices.
-  const allowedBasicKeys = new Set([
-    "title",
-    "name",
-    "game_id",
-    "gameid",
-    "quality",
-    "rarity",
-    "exterior",
-    "condition",
-    "wear",
-    "category",
-    "type",
-    "item_type",
+  const allowedKeys = new Set([
+    "phase",
+    "paintseed",
+    "paint_seed",
+    "floatpartvalue",
+    "float_part_value",
   ]);
   for (const key of keys) {
-    if (!allowedBasicKeys.has(key)) {
-      return true;
+    if (!allowedKeys.has(key)) {
+      return false;
     }
   }
 
-  return false;
+  return true;
 }
 
 function extractOrderPriceUsd(order, priceInCoins) {
@@ -456,18 +461,28 @@ export class DMarketTargetBot {
   }
 
   async analyzeTitles(titles) {
-    const uniqueTitles = [...new Set(titles.map((title) => title.trim()))].filter(
-      Boolean,
-    );
-
-    if (uniqueTitles.length === 0) {
+    const pricingRows = await this.analyzeTitlesPricing(titles, {
+      targetsConcurrency: config.bot.analysisTargetsConcurrency,
+    });
+    if (pricingRows.length === 0) {
       return [];
     }
 
-    const aggregatedByTitle = await this.fetchAggregatedPricesByTitle(uniqueTitles);
-    return buildOpportunities([...aggregatedByTitle.values()], {
+    const syntheticAggregated = pricingRows.map((row) => ({
+      MarketHashName: row.title,
+      Offers: {
+        BestPrice: `${row.minOfferUsd}`,
+        Count: row.offerCount,
+      },
+      Orders: {
+        BestPrice: `${row.maxTargetUsd}`,
+        Count: row.targetStrictAnyOrdersCount || row.orderCount || 0,
+      },
+    }));
+
+    return buildOpportunities(syntheticAggregated, {
       strategy: config.strategy,
-      priceInCoins: config.dmarket.aggregatedPricesInCoins,
+      priceInCoins: false,
     });
   }
 
@@ -480,7 +495,7 @@ export class DMarketTargetBot {
       const orders = extractTargetOrdersArray(response);
 
       const allPrices = [];
-      const basePrices = [];
+      const strictAnyPrices = [];
       for (const order of orders) {
         const priceUsd = extractOrderPriceUsd(
           order,
@@ -491,12 +506,12 @@ export class DMarketTargetBot {
         }
 
         allPrices.push(priceUsd);
-        if (!isSpecializedTargetOrder(order)) {
-          basePrices.push(priceUsd);
+        if (isDefaultAnyTargetOrder(order)) {
+          strictAnyPrices.push(priceUsd);
         }
       }
 
-      const selectedPrices = basePrices.length > 0 ? basePrices : allPrices;
+      const selectedPrices = strictAnyPrices;
       const minTargetUsd =
         selectedPrices.length > 0 ? roundUsd(Math.min(...selectedPrices)) : null;
       const maxTargetUsd =
@@ -508,8 +523,9 @@ export class DMarketTargetBot {
         rawResponse: response,
         totalOrdersCount: orders.length,
         parsedPricesCount: allPrices.length,
-        baseOrdersCount: basePrices.length,
-        selectedSource: basePrices.length > 0 ? "base_orders" : "all_orders_fallback",
+        strictAnyOrdersCount: strictAnyPrices.length,
+        selectedSource:
+          strictAnyPrices.length > 0 ? "strict_any_orders" : "no_strict_any_orders",
       };
     } catch (error) {
       this.logger.warn("Failed to fetch targets-by-title", {
@@ -523,7 +539,7 @@ export class DMarketTargetBot {
         rawResponse: null,
         totalOrdersCount: 0,
         parsedPricesCount: 0,
-        baseOrdersCount: 0,
+        strictAnyOrdersCount: 0,
         selectedSource: "unavailable",
       };
     }
@@ -577,8 +593,6 @@ export class DMarketTargetBot {
           raw?.Offers?.BestPrice,
           config.dmarket.aggregatedPricesInCoins,
         );
-        const aggregatedTargetUsd =
-          toUsd(raw?.Orders?.BestPrice, config.dmarket.aggregatedPricesInCoins) || 0;
         const offerCount = parseNumber(raw?.Offers?.Count) || 0;
         const orderCount = parseNumber(raw?.Orders?.Count) || 0;
 
@@ -595,12 +609,22 @@ export class DMarketTargetBot {
         }
 
         const targetStats = await this.getTargetStatsByTitle(title);
-        const maxTargetUsd = Number.isFinite(targetStats.maxTargetUsd)
-          ? targetStats.maxTargetUsd
-          : roundUsd(aggregatedTargetUsd);
+        if (!Number.isFinite(targetStats.maxTargetUsd)) {
+          processed += 1;
+          if (
+            typeof onProgress === "function" &&
+            progressEvery > 0 &&
+            processed % progressEvery === 0
+          ) {
+            onProgress({ processed, total: uniqueTitles.length });
+          }
+          continue;
+        }
+
+        const maxTargetUsd = targetStats.maxTargetUsd;
         const minTargetUsd = Number.isFinite(targetStats.minTargetUsd)
           ? targetStats.minTargetUsd
-          : roundUsd(aggregatedTargetUsd);
+          : targetStats.maxTargetUsd;
         const edgePct =
           minOfferUsd > 0
             ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
@@ -621,7 +645,7 @@ export class DMarketTargetBot {
           orderCount,
           targetSource: targetStats.selectedSource,
           targetOrdersCount: targetStats.totalOrdersCount,
-          targetBaseOrdersCount: targetStats.baseOrdersCount,
+          targetStrictAnyOrdersCount: targetStats.strictAnyOrdersCount,
           rawTargetsByTitle: targetStats.rawResponse,
         };
 
