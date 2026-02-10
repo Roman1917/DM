@@ -364,14 +364,31 @@ async function handleOptionDiagnostics(bot) {
   }
 
   const title = titles[0];
+  const rawAggregatedResponse = await bot.client.getAggregatedPrices({
+    titles: [title],
+    limit: 1,
+    offset: 0,
+  });
   const pricing = await bot.analyzeTitlesPricing([title]);
   if (pricing.length === 0) {
     // eslint-disable-next-line no-console
     console.log(`Не удалось получить цены для: ${title}`);
+    // eslint-disable-next-line no-console
+    console.log("RAW API response:");
+    // eslint-disable-next-line no-console
+    console.log(JSON.stringify(rawAggregatedResponse, null, 2));
     return;
   }
 
   const item = pricing[0];
+  // eslint-disable-next-line no-console
+  console.log("RAW API response (/price-aggregator/v1/aggregated-prices):");
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify(rawAggregatedResponse, null, 2));
+  // eslint-disable-next-line no-console
+  console.log("RAW parsed pricing object:");
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify(item, null, 2));
   // eslint-disable-next-line no-console
   console.log(`Title: ${item.title}`);
   // eslint-disable-next-line no-console
