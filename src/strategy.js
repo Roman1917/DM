@@ -1,4 +1,5 @@
 import {
+  floorUsd,
   maxTargetByProfitability,
   parseNumber,
   roundUsd,
@@ -94,8 +95,9 @@ function evaluateOpportunity(normalized, strategy) {
       ? orderBestUsd + strategy.bidStepUsd
       : offerBestUsd * strategy.noOrderBidRatio;
 
-  let targetPriceUsd = Math.min(maxTargetUsd, bidToBeatUsd);
-  targetPriceUsd = roundUsd(Math.max(targetPriceUsd, strategy.minBuyPriceUsd));
+  const flooredMaxTargetUsd = floorUsd(maxTargetUsd);
+  let targetPriceUsd = Math.min(flooredMaxTargetUsd, bidToBeatUsd);
+  targetPriceUsd = floorUsd(Math.max(targetPriceUsd, strategy.minBuyPriceUsd));
 
   const netSellUsd = expectedSellUsd * (1 - strategy.saleCommissionPct / 100);
   const profitUsd = netSellUsd - targetPriceUsd;
@@ -115,6 +117,7 @@ function evaluateOpportunity(normalized, strategy) {
     orderBestUsd: roundUsd(orderBestUsd),
     spreadUsd: roundUsd(spreadUsd),
     expectedSellUsd: roundUsd(expectedSellUsd),
+    maxTargetUsd: flooredMaxTargetUsd,
     targetPriceUsd,
     netSellUsd: roundUsd(netSellUsd),
     profitUsd: roundUsd(profitUsd),

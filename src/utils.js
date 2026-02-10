@@ -73,6 +73,15 @@ export function roundUsd(value) {
   return Number(Number(value).toFixed(2));
 }
 
+export function floorUsd(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) {
+    return 0;
+  }
+
+  return Number((Math.floor(amount * 100) / 100).toFixed(2));
+}
+
 export function maxTargetByProfitability({
   expectedSellUsd,
   saleCommissionPct,

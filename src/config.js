@@ -85,7 +85,7 @@ export const config = {
       process.cwd(),
       getString("ANALYSIS_OUTPUT_PATH", "data/opportunities-report.txt"),
     ),
-    analysisMinTargetPriceUsd: getNumber("ANALYSIS_MIN_TARGET_PRICE_USD", 10),
+    analysisMinTargetPriceUsd: getNumber("ANALYSIS_MIN_TARGET_PRICE_USD", 30),
     analysisMinMonthlySales: getNumber("ANALYSIS_MIN_MONTHLY_SALES", 10),
     analysisSalesConcurrency: getNumber("ANALYSIS_SALES_CONCURRENCY", 5),
   },

@@ -64,12 +64,86 @@ function printOpportunitiesTable(opportunities, limit = 50) {
   console.table(rows);
 }
 
+function toAnalysisRow(entry) {
+  const maxTargetUsd = roundUsd(entry.maxTargetUsd ?? entry.targetPriceUsd);
+  const minOfferUsd = roundUsd(entry.offerBestUsd);
+  const edgePct =
+    minOfferUsd > 0
+      ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
+      : 0;
+
+  return {
+    title: entry.title,
+    maxTargetUsd,
+    minOfferUsd,
+    edgePct,
+    monthlySales: entry.monthlySales ?? 0,
+  };
+}
+
+function formatAlignedAnalysisLines(rows) {
+  if (rows.length === 0) {
+    return [];
+  }
+
+  const titleWidth = Math.max(
+    "Название".length,
+    ...rows.map((row) => row.title.length),
+  );
+  const targetWidth = Math.max(
+    "Max target".length,
+    ...rows.map((row) => `$${row.maxTargetUsd.toFixed(2)}`.length),
+  );
+  const offerWidth = Math.max(
+    "Min offer".length,
+    ...rows.map((row) => `$${row.minOfferUsd.toFixed(2)}`.length),
+  );
+  const edgeWidth = Math.max(
+    "Выгода".length,
+    ...rows.map((row) => `${row.edgePct.toFixed(2)}%`.length),
+  );
+
+  const header =
+    `${"Название".padEnd(titleWidth)} | ` +
+    `${"Max target".padStart(targetWidth)} | ` +
+    `${"Min offer".padStart(offerWidth)} | ` +
+    `${"Выгода".padStart(edgeWidth)}`;
+  const separator = "-".repeat(header.length);
+
+  const lines = rows.map((row) => {
+    const target = `$${row.maxTargetUsd.toFixed(2)}`;
+    const offer = `$${row.minOfferUsd.toFixed(2)}`;
+    const edge = `${row.edgePct.toFixed(2)}%`;
+    return (
+      `${row.title.padEnd(titleWidth)} | ` +
+      `${target.padStart(targetWidth)} | ` +
+      `${offer.padStart(offerWidth)} | ` +
+      `${edge.padStart(edgeWidth)}`
+    );
+  });
+
+  return [header, separator, ...lines];
+}
+
+function printAnalysisPreview(rows, limit = 50) {
+  const previewRows = rows.slice(0, limit);
+  if (previewRows.length === 0) {
+    // eslint-disable-next-line no-console
+    console.log("Нет подходящих вещей после фильтров.");
+    return;
+  }
+
+  const lines = formatAlignedAnalysisLines(previewRows);
+  // eslint-disable-next-line no-console
+  console.log(lines.join("\n"));
+}
+
 function printMenu() {
   // eslint-disable-next-line no-console
   console.log(`
 ================ DMarket Bot Menu ================
 1 - Скан всей площадки и запись названий в файл
-2 - Анализ из файла + отчет (title-target-order-ROI, фильтры >=10$/>=10 продаж/мес)
+2 - Анализ из файла + отчет (max target/min offer/выгода, фильтры >30$/>=10 продаж)
 3 - Выставление таргетов на самые выгодные вещи из файла
 4 - Авто-обновление таргетов каждые 15 минут
 5 - Диагностика API и состояния
@@ -140,7 +214,7 @@ async function handleOptionAnalyzeFromFile(rl, bot) {
 
   const opportunities = await bot.analyzeTitles(titles);
   const byTargetPrice = opportunities.filter(
-    (entry) => entry.targetPriceUsd >= config.bot.analysisMinTargetPriceUsd,
+    (entry) => (entry.maxTargetUsd ?? entry.targetPriceUsd) > config.bot.analysisMinTargetPriceUsd,
   );
   const filteredBySales = await bot.filterOpportunitiesByMonthlySales(
     byTargetPrice,
@@ -149,30 +223,34 @@ async function handleOptionAnalyzeFromFile(rl, bot) {
       concurrency: config.bot.analysisSalesConcurrency,
     },
   );
-  const finalReport = [...filteredBySales].sort((a, b) => {
-    if (b.roiPct !== a.roiPct) {
-      return b.roiPct - a.roiPct;
-    }
-    return b.profitUsd - a.profitUsd;
-  });
+  const analysisRows = filteredBySales
+    .map((entry) => toAnalysisRow(entry))
+    .filter((entry) => entry.edgePct > 0)
+    .sort((a, b) => {
+      if (b.edgePct !== a.edgePct) {
+        return b.edgePct - a.edgePct;
+      }
 
-  const lines = finalReport.map(
-    (entry) =>
-      `${entry.title} - ${roundUsd(entry.targetPriceUsd).toFixed(2)}$ - ${roundUsd(
-        entry.orderBestUsd,
-      ).toFixed(2)}$ - ${roundUsd(entry.roiPct).toFixed(2)}%`,
-  );
+      if (b.maxTargetUsd !== a.maxTargetUsd) {
+        return b.maxTargetUsd - a.maxTargetUsd;
+      }
+
+      return b.monthlySales - a.monthlySales;
+    });
+
+  const lines = formatAlignedAnalysisLines(analysisRows);
   await ensureParentDirectory(outputPath);
-  await fs.writeFile(outputPath, `${lines.join("\n")}\n`, "utf8");
+  const fileContent = lines.length > 0 ? `${lines.join("\n")}\n` : "";
+  await fs.writeFile(outputPath, fileContent, "utf8");
 
   // eslint-disable-next-line no-console
   console.log(
-    `Проанализировано: ${titles.length}, после фильтра target>=${config.bot.analysisMinTargetPriceUsd}$: ${byTargetPrice.length}, после фильтра продаж>=${config.bot.analysisMinMonthlySales}/мес: ${finalReport.length}`,
+    `Проанализировано: ${titles.length}, после фильтра max target>${config.bot.analysisMinTargetPriceUsd}$: ${byTargetPrice.length}, после фильтра продаж>=${config.bot.analysisMinMonthlySales}/мес: ${analysisRows.length}`,
   );
-  printOpportunitiesTable(finalReport, printLimit);
+  printAnalysisPreview(analysisRows, printLimit);
   // eslint-disable-next-line no-console
   console.log(
-    `Отчет сохранен: ${outputPath}. Формат: название - цена таргета - цена ордера - процент выгоды`,
+    `Отчет сохранен: ${outputPath}. Формат: выровненный список (название | max target | min offer | выгода)`,
   );
 }
 
