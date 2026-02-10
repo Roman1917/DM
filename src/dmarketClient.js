@@ -23,6 +23,8 @@ export class DMarketClient {
     this.config = config;
     this.logger = logger;
     this.signingKey = buildSigningKey(config.secretKey);
+    this.rateLimitQueue = Promise.resolve();
+    this.nextRequestAtMs = 0;
   }
 
   buildSignature({ method, pathWithQuery, bodyString, timestamp }) {
@@ -33,39 +35,58 @@ export class DMarketClient {
     return toHex(signature);
   }
 
+  async acquireRequestSlot() {
+    const baseIntervalMs = Math.max(0, Math.floor(this.config.requestMinIntervalMs || 0));
+    const jitterMs = Math.max(0, Math.floor(this.config.requestJitterMs || 0));
+    const randomJitter = jitterMs > 0 ? Math.floor(Math.random() * (jitterMs + 1)) : 0;
+
+    const slotPromise = this.rateLimitQueue.then(async () => {
+      const now = Date.now();
+      const waitMs = Math.max(0, this.nextRequestAtMs - now);
+      if (waitMs > 0) {
+        await sleep(waitMs);
+      }
+
+      this.nextRequestAtMs = Date.now() + baseIntervalMs + randomJitter;
+    });
+
+    this.rateLimitQueue = slotPromise.catch(() => {});
+    await slotPromise;
+  }
+
   async request({ method, path, query, body }) {
     const queryString = buildQuery(query);
     const pathWithQuery = queryString ? `${path}?${queryString}` : path;
     const url = `${this.config.baseUrl}${pathWithQuery}`;
     const bodyString = body ? JSON.stringify(body) : "";
-    const timestamp = `${Math.floor(Date.now() / 1000)}`;
-    const signature = this.buildSignature({
-      method,
-      pathWithQuery,
-      bodyString,
-      timestamp,
-    });
-
-    const headers = {
-      Accept: "application/json",
-      "X-Api-Key": this.config.apiKey,
-      "X-Sign-Date": timestamp,
-      "X-Request-Sign": signature,
-    };
-
-    if (this.config.authorization) {
-      headers.Authorization = this.config.authorization;
-    }
-
-    if (body) {
-      headers["Content-Type"] = "application/json";
-    }
 
     let attempt = 0;
     const maxAttempts = Math.max(1, this.config.maxRetries + 1);
     let lastError = null;
 
     while (attempt < maxAttempts) {
+      await this.acquireRequestSlot();
+
+      const timestamp = `${Math.floor(Date.now() / 1000)}`;
+      const signature = this.buildSignature({
+        method,
+        pathWithQuery,
+        bodyString,
+        timestamp,
+      });
+      const headers = {
+        Accept: "application/json",
+        "X-Api-Key": this.config.apiKey,
+        "X-Sign-Date": timestamp,
+        "X-Request-Sign": signature,
+      };
+      if (this.config.authorization) {
+        headers.Authorization = this.config.authorization;
+      }
+      if (body) {
+        headers["Content-Type"] = "application/json";
+      }
+
       const controller = new AbortController();
       const timeoutId = setTimeout(
         () => controller.abort(),
@@ -97,7 +118,11 @@ export class DMarketClient {
           error.payload = payload;
 
           if (retriable && attempt < maxAttempts - 1) {
-            const delayMs = 500 * 2 ** attempt;
+            const retryAfterHeader = response.headers.get("retry-after");
+            const retryAfterMs = Number.isFinite(Number(retryAfterHeader))
+              ? Math.max(0, Number(retryAfterHeader) * 1000)
+              : null;
+            const delayMs = retryAfterMs ?? 1_000 * 2 ** attempt;
             this.logger.warn("Retrying DMarket API request", {
               method,
               pathWithQuery,
@@ -235,18 +260,19 @@ export class DMarketClient {
   async getLastSales({
     gameId,
     title,
-    limit = 200,
+    limit = 20,
     offset = 0,
     filters,
     txOperationType,
   }) {
+    const safeLimit = Math.max(1, Math.min(20, Math.floor(limit)));
     return this.request({
       method: "GET",
       path: "/trade-aggregator/v1/last-sales",
       query: {
         gameId,
         title,
-        limit: `${limit}`,
+        limit: `${safeLimit}`,
         offset: `${offset}`,
         filters,
         txOperationType,

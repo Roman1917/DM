@@ -79,6 +79,12 @@ cp .env.example .env
 - `DMARKET_AGGREGATED_PRICES_IN_COINS`  
   (обычно должно быть `false`).
 
+Чтобы снизить шанс `429 Too Many Requests`, регулируйте:
+
+- `DMARKET_REQUEST_MIN_INTERVAL_MS` (пауза между запросами),
+- `DMARKET_REQUEST_JITTER_MS` (случайный джиттер для сглаживания нагрузки),
+- `ANALYSIS_SALES_CONCURRENCY` (параллелизм проверки продаж, по умолчанию 1).
+
 3. Проверьте торговые параметры стратегии в `.env`.
 
 ## Запуск

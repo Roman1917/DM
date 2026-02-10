@@ -33,6 +33,13 @@ function toTargetPayload({ title, amount, priceUsd, currency }) {
 }
 
 function normalizeUnixTimestamp(value) {
+  if (typeof value === "string" && Number.isNaN(Number(value))) {
+    const parsedDateMs = Date.parse(value);
+    if (Number.isFinite(parsedDateMs) && parsedDateMs > 0) {
+      return Math.floor(parsedDateMs / 1000);
+    }
+  }
+
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return null;
@@ -44,6 +51,120 @@ function normalizeUnixTimestamp(value) {
   }
 
   return Math.floor(parsed);
+}
+
+function extractTimestampFromUnknownValue(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (typeof value === "number" || typeof value === "string") {
+    return normalizeUnixTimestamp(value);
+  }
+
+  if (typeof value === "object") {
+    const nestedCandidates = [
+      value.seconds,
+      value.Seconds,
+      value.timestamp,
+      value.Timestamp,
+      value.time,
+      value.Time,
+      value.date,
+      value.Date,
+    ];
+    for (const candidate of nestedCandidates) {
+      const normalized = extractTimestampFromUnknownValue(candidate);
+      if (normalized !== null) {
+        return normalized;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractSaleTimestamp(sale) {
+  if (!sale || typeof sale !== "object") {
+    return null;
+  }
+
+  const directCandidates = [
+    sale.date,
+    sale.Date,
+    sale.createdAt,
+    sale.CreatedAt,
+    sale.created_at,
+    sale.timestamp,
+    sale.Timestamp,
+    sale.time,
+    sale.Time,
+    sale.ts,
+    sale.TS,
+  ];
+  for (const candidate of directCandidates) {
+    const normalized = extractTimestampFromUnknownValue(candidate);
+    if (normalized !== null) {
+      return normalized;
+    }
+  }
+
+  for (const [key, value] of Object.entries(sale)) {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey.includes("date") || normalizedKey.includes("time")) {
+      const normalized = extractTimestampFromUnknownValue(value);
+      if (normalized !== null) {
+        return normalized;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractSalesArray(response) {
+  if (!response) {
+    return [];
+  }
+
+  if (Array.isArray(response)) {
+    return response;
+  }
+
+  const directCandidates = [
+    response.sales,
+    response.Sales,
+    response.items,
+    response.Items,
+    response.objects,
+    response.Objects,
+    response.data?.sales,
+    response.data?.Sales,
+    response.data?.items,
+    response.data?.Items,
+    response.result?.sales,
+    response.result?.Sales,
+  ];
+
+  for (const candidate of directCandidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (response.sales && typeof response.sales === "object") {
+    const grouped = [];
+    for (const value of Object.values(response.sales)) {
+      if (Array.isArray(value)) {
+        grouped.push(...value);
+      }
+    }
+    if (grouped.length > 0) {
+      return grouped;
+    }
+  }
+
+  return [];
 }
 
 export class DMarketTargetBot {
@@ -199,48 +320,66 @@ export class DMarketTargetBot {
 
   async getMonthlySalesCount(
     title,
-    { days = 30, pageLimit = 200, maxPages = 10 } = {},
+    { days = 30, pageLimit = 20, maxPages = 12, stopAt = null } = {},
   ) {
     const now = Math.floor(Date.now() / 1000);
     const fromTimestamp = now - days * 24 * 60 * 60;
+    const safePageLimit = Math.max(1, Math.min(20, Math.floor(pageLimit)));
 
     let page = 0;
     let offset = 0;
     let count = 0;
+    let hadAnySalesRows = false;
 
     while (page < maxPages) {
       const response = await this.client.getLastSales({
         gameId: config.bot.gameId,
         title,
-        limit: pageLimit,
+        limit: safePageLimit,
         offset,
       });
 
-      const sales = response?.sales || [];
+      const sales = extractSalesArray(response);
       if (sales.length === 0) {
         break;
       }
+      hadAnySalesRows = true;
 
       let sawOlderSale = false;
+      let parsedTimestampRows = 0;
       for (const sale of sales) {
-        const ts = normalizeUnixTimestamp(sale?.date);
+        const ts = extractSaleTimestamp(sale);
         if (ts === null) {
           continue;
         }
+        parsedTimestampRows += 1;
 
         if (ts >= fromTimestamp) {
           count += 1;
+          if (stopAt !== null && count >= stopAt) {
+            return count;
+          }
         } else {
           sawOlderSale = true;
         }
       }
 
-      if (sawOlderSale || sales.length < pageLimit) {
+      // Fallback for unexpected response format: if rows exist but dates are absent,
+      // use row count from the first page as a conservative monthly proxy.
+      if (parsedTimestampRows === 0 && page === 0 && sales.length > 0) {
+        return sales.length;
+      }
+
+      if (sawOlderSale || sales.length < safePageLimit) {
         break;
       }
 
       page += 1;
-      offset += pageLimit;
+      offset += safePageLimit;
+    }
+
+    if (!hadAnySalesRows) {
+      return 0;
     }
 
     return count;
@@ -257,6 +396,7 @@ export class DMarketTargetBot {
     const safeConcurrency = Math.max(1, Math.floor(concurrency));
     const enriched = [];
     let index = 0;
+    let sourceZeroCount = 0;
 
     const worker = async () => {
       while (true) {
@@ -269,6 +409,7 @@ export class DMarketTargetBot {
         const opportunity = opportunities[currentIndex];
         const monthlySales = await this.getMonthlySalesCount(opportunity.title, {
           days,
+          stopAt: minSalesPerMonth,
         });
 
         if (monthlySales >= minSalesPerMonth) {
@@ -276,6 +417,8 @@ export class DMarketTargetBot {
             ...opportunity,
             monthlySales,
           });
+        } else if (monthlySales === 0) {
+          sourceZeroCount += 1;
         }
       }
     };
@@ -285,6 +428,31 @@ export class DMarketTargetBot {
       workers.push(worker());
     }
     await Promise.all(workers);
+
+    this.logger.info("Monthly sales filter summary", {
+      checked: opportunities.length,
+      passed: enriched.length,
+      zeroSalesCount: sourceZeroCount,
+      minSalesPerMonth,
+      days,
+    });
+
+    if (
+      enriched.length === 0 &&
+      opportunities.length > 0 &&
+      sourceZeroCount === opportunities.length
+    ) {
+      this.logger.warn(
+        "Last-sales endpoint returned zero for all titles. Falling back to liquidity proxy.",
+      );
+      return opportunities
+        .map((entry) => ({
+          ...entry,
+          monthlySales: Math.max(entry.offerCount || 0, entry.orderCount || 0),
+          monthlySalesSource: "liquidity_proxy",
+        }))
+        .filter((entry) => entry.monthlySales >= minSalesPerMonth);
+    }
 
     return enriched;
   }
