@@ -8,7 +8,14 @@ import {
   planManagedUpdates,
   planNewTargets,
 } from "./strategy.js";
-import { chunkArray, parseNumber, roundUsd, toUsd } from "./utils.js";
+import {
+  chunkArray,
+  floorUsd,
+  maxTargetByProfitability,
+  parseNumber,
+  roundUsd,
+  toUsd,
+} from "./utils.js";
 
 export function parseBalanceUsd(balance, priceInCoins) {
   const rawValue =
@@ -332,6 +339,87 @@ export class DMarketTargetBot {
     });
   }
 
+  async analyzeTitlesPricing(titles) {
+    const uniqueTitles = [...new Set(titles.map((title) => title.trim()))].filter(
+      Boolean,
+    );
+
+    if (uniqueTitles.length === 0) {
+      return [];
+    }
+
+    const aggregatedByTitle = await this.fetchAggregatedPricesByTitle(uniqueTitles);
+    const rows = [];
+
+    for (const title of uniqueTitles) {
+      const raw = aggregatedByTitle.get(title);
+      if (!raw) {
+        continue;
+      }
+
+      const minOfferUsd = toUsd(
+        raw?.Offers?.BestPrice,
+        config.dmarket.aggregatedPricesInCoins,
+      );
+      const bestOrderUsd =
+        toUsd(raw?.Orders?.BestPrice, config.dmarket.aggregatedPricesInCoins) || 0;
+      const offerCount = parseNumber(raw?.Offers?.Count) || 0;
+      const orderCount = parseNumber(raw?.Orders?.Count) || 0;
+
+      if (!Number.isFinite(minOfferUsd) || minOfferUsd <= 0) {
+        continue;
+      }
+
+      const expectedSellUsd =
+        minOfferUsd * (1 - config.strategy.quickSaleDiscountPct / 100);
+      const rawMaxTargetUsd = maxTargetByProfitability({
+        expectedSellUsd,
+        saleCommissionPct: config.strategy.saleCommissionPct,
+        minProfitUsd: config.strategy.minProfitUsd,
+        minRoiPct: config.strategy.minRoiPct,
+      });
+      const maxTargetUsd = floorUsd(Math.max(0, rawMaxTargetUsd || 0));
+
+      const bidToBeatUsd =
+        bestOrderUsd > 0
+          ? bestOrderUsd + config.strategy.bidStepUsd
+          : minOfferUsd * config.strategy.noOrderBidRatio;
+      const targetPriceUsd = floorUsd(
+        Math.max(
+          config.strategy.minBuyPriceUsd,
+          Math.min(maxTargetUsd || config.strategy.minBuyPriceUsd, bidToBeatUsd),
+        ),
+      );
+
+      const netSellUsd =
+        expectedSellUsd * (1 - config.strategy.saleCommissionPct / 100);
+      const edgePct =
+        minOfferUsd > 0
+          ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
+          : 0;
+      const roiPct =
+        targetPriceUsd > 0
+          ? roundUsd(((netSellUsd - targetPriceUsd) / targetPriceUsd) * 100)
+          : 0;
+
+      rows.push({
+        title,
+        maxTargetUsd: roundUsd(maxTargetUsd),
+        minOfferUsd: roundUsd(minOfferUsd),
+        targetPriceUsd: roundUsd(targetPriceUsd),
+        orderBestUsd: roundUsd(bestOrderUsd),
+        expectedSellUsd: roundUsd(expectedSellUsd),
+        netSellUsd: roundUsd(netSellUsd),
+        edgePct,
+        roiPct,
+        offerCount,
+        orderCount,
+      });
+    }
+
+    return rows;
+  }
+
   async getMonthlySalesCount(
     title,
     { days = 30, pageLimit = 20, maxPages = 12, stopAt = null } = {},
@@ -405,12 +493,15 @@ export class DMarketTargetBot {
       minSalesPerMonth = config.bot.analysisMinMonthlySales,
       concurrency = config.bot.analysisSalesConcurrency,
       days = 30,
+      progressEvery = 0,
+      onProgress = null,
     } = {},
   ) {
     const safeConcurrency = Math.max(1, Math.floor(concurrency));
     const enriched = [];
     let index = 0;
     let sourceZeroCount = 0;
+    let checkedCount = 0;
 
     const worker = async () => {
       while (true) {
@@ -425,6 +516,19 @@ export class DMarketTargetBot {
           days,
           stopAt: minSalesPerMonth,
         });
+        checkedCount += 1;
+
+        if (
+          typeof onProgress === "function" &&
+          progressEvery > 0 &&
+          checkedCount % progressEvery === 0
+        ) {
+          onProgress({
+            checkedCount,
+            total: opportunities.length,
+            passed: enriched.length,
+          });
+        }
 
         if (monthlySales >= minSalesPerMonth) {
           enriched.push({

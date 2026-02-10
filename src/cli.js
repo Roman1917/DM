@@ -10,6 +10,8 @@ import { ensureParentDirectory, roundUsd } from "./utils.js";
 
 const DEFAULT_TITLES_PATH = path.resolve(process.cwd(), "data/market-titles.txt");
 const DEFAULT_ANALYSIS_PATH = config.bot.analysisOutputPath;
+const OPTION1_MIN_OFFER_USD = 20;
+const OPTION1_MIN_MONTHLY_SALES = 10;
 
 function resolveUserPath(userInput, fallbackAbsolutePath) {
   const value = userInput.trim();
@@ -65,13 +67,17 @@ function printOpportunitiesTable(opportunities, limit = 50) {
 }
 
 function toAnalysisRow(entry) {
-  const maxTargetUsd = roundUsd(entry.maxTargetUsd ?? entry.targetPriceUsd);
-  const minOfferUsd = roundUsd(entry.offerBestUsd);
-  const edgePct = Number.isFinite(Number(entry.roiPct))
-    ? roundUsd(Number(entry.roiPct))
-    : minOfferUsd > 0
-      ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
-      : 0;
+  const maxTargetUsd = roundUsd(
+    entry.maxTargetUsd ?? entry.targetPriceUsd ?? entry.minOfferUsd ?? 0,
+  );
+  const minOfferUsd = roundUsd(entry.minOfferUsd ?? entry.offerBestUsd ?? 0);
+  const edgePct = Number.isFinite(Number(entry.edgePct))
+    ? roundUsd(Number(entry.edgePct))
+    : Number.isFinite(Number(entry.roiPct))
+      ? roundUsd(Number(entry.roiPct))
+      : minOfferUsd > 0
+        ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
+        : 0;
 
   return {
     title: entry.title,
@@ -144,7 +150,7 @@ function printMenu() {
   console.log(`
 ================ DMarket Bot Menu ================
 1 - Скан всей площадки и запись названий в файл
-2 - Авто-анализ ВСЕХ вещей из data/market-titles.txt (без ввода) + отчет
+2 - Авто-анализ ВСЕХ вещей из data/market-titles.txt (без фильтров) + отчет
 3 - Выставление таргетов на самые выгодные вещи из файла
 4 - Авто-обновление таргетов каждые 15 минут
 5 - Диагностика API и состояния
@@ -196,11 +202,34 @@ async function handleOptionScanTitles(rl, bot) {
       );
     },
   });
-  const storedTitles = await saveTitlesToFile(titlesFilePath, titles);
+  // eslint-disable-next-line no-console
+  console.log(
+    `Этап 2/3: расчёт цен для ${titles.length} titles (min offer / max target)...`,
+  );
+  const pricingRows = await bot.analyzeTitlesPricing(titles);
+  const byMinOffer = pricingRows.filter(
+    (entry) => entry.minOfferUsd >= OPTION1_MIN_OFFER_USD,
+  );
 
   // eslint-disable-next-line no-console
   console.log(
-    `Готово: найдено ${titles.length} / сохранено ${storedTitles.length} titles в ${titlesFilePath}`,
+    `Этап 3/3: фильтр по продажам >=${OPTION1_MIN_MONTHLY_SALES}/30д для ${byMinOffer.length} titles...`,
+  );
+  const bySales = await bot.filterOpportunitiesByMonthlySales(byMinOffer, {
+    minSalesPerMonth: OPTION1_MIN_MONTHLY_SALES,
+    concurrency: config.bot.analysisSalesConcurrency,
+    progressEvery: 20,
+    onProgress: ({ checkedCount, total, passed }) => {
+      // eslint-disable-next-line no-console
+      console.log(`[sales] Проверено ${checkedCount}/${total}, прошло ${passed}`);
+    },
+  });
+  const filteredTitles = bySales.map((entry) => entry.title);
+  const storedTitles = await saveTitlesToFile(titlesFilePath, filteredTitles);
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `Готово: найдено ${titles.length}, после price>=${OPTION1_MIN_OFFER_USD}$: ${byMinOffer.length}, после sales>=${OPTION1_MIN_MONTHLY_SALES}/30д: ${storedTitles.length}. Сохранено в ${titlesFilePath}`,
   );
 }
 
@@ -221,18 +250,8 @@ async function handleOptionAnalyzeFromFile(bot) {
     return;
   }
 
-  const opportunities = await bot.analyzeTitles(titles);
-  const byTargetPrice = opportunities.filter(
-    (entry) => (entry.maxTargetUsd ?? entry.targetPriceUsd) > config.bot.analysisMinTargetPriceUsd,
-  );
-  const filteredBySales = await bot.filterOpportunitiesByMonthlySales(
-    byTargetPrice,
-    {
-      minSalesPerMonth: config.bot.analysisMinMonthlySales,
-      concurrency: config.bot.analysisSalesConcurrency,
-    },
-  );
-  const analysisRows = filteredBySales.map((entry) => toAnalysisRow(entry)).sort((a, b) => {
+  const pricingRows = await bot.analyzeTitlesPricing(titles);
+  const analysisRows = pricingRows.map((entry) => toAnalysisRow(entry)).sort((a, b) => {
       if (b.edgePct !== a.edgePct) {
         return b.edgePct - a.edgePct;
       }
@@ -251,7 +270,7 @@ async function handleOptionAnalyzeFromFile(bot) {
 
   // eslint-disable-next-line no-console
   console.log(
-    `Проанализировано: ${titles.length}, после фильтра max target>${config.bot.analysisMinTargetPriceUsd}$: ${byTargetPrice.length}, после фильтра продаж>=${config.bot.analysisMinMonthlySales}/мес: ${analysisRows.length}`,
+    `Проанализировано: ${titles.length}, в отчет попало: ${analysisRows.length}`,
   );
   printAnalysisPreview(analysisRows, printLimit);
   // eslint-disable-next-line no-console
