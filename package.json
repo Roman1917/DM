@@ -1,0 +1,31 @@
+{
+  "name": "dmarket-target-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Automated DMarket target bidding bot",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/cli.js",
+    "start:auto": "node src/runBot.js",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Roman1917/DM.git"
+  },
+  "keywords": [
+    "dmarket",
+    "bot",
+    "trading"
+  ],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Roman1917/DM/issues"
+  },
+  "homepage": "https://github.com/Roman1917/DM#readme",
+  "dependencies": {
+    "dotenv": "^17.2.4",
+    "tweetnacl": "^1.0.3"
+  }
+}
