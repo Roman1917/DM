@@ -95,6 +95,15 @@ export const config = {
     analysisMinMonthlySales: getNumber("ANALYSIS_MIN_MONTHLY_SALES", 10),
     analysisSalesConcurrency: getNumber("ANALYSIS_SALES_CONCURRENCY", 1),
     analysisTargetsConcurrency: getNumber("ANALYSIS_TARGETS_CONCURRENCY", 1),
+    competitiveMinProfitMarginPct: getNumber(
+      "BOT_COMPETITIVE_MIN_PROFIT_MARGIN_PCT",
+      10,
+    ),
+    competitiveBidStepUsd: getNumber("BOT_COMPETITIVE_BID_STEP_USD", 0.01),
+    competitiveDeleteUnprofitable: getBoolean(
+      "BOT_COMPETITIVE_DELETE_UNPROFITABLE",
+      true,
+    ),
   },
   strategy: {
     // Marketplace scan controls

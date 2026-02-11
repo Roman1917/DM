@@ -152,7 +152,7 @@ function printMenu() {
 1 - Скан всей площадки и запись названий в файл
 2 - Авто-анализ ВСЕХ вещей из data/market-titles.txt (без фильтров) + отчет
 3 - Выставление таргетов на самые выгодные вещи из файла
-4 - Авто-обновление таргетов каждые 15 минут
+4 - Авто-обновление моих таргетов (держать 1-е место, профит >=10%)
 5 - Диагностика + 1 вещь из market-titles.txt (target/order)
 6 - Один полный цикл ребаланса прямо сейчас
 0 - Выход
@@ -430,10 +430,14 @@ async function handleOptionDiagnostics(bot) {
 }
 
 async function startAutoMode(bot) {
-  await bot.startAutoUpdate();
+  await bot.runCompetitiveTargetUpdateCycleSafe();
+  bot.intervalId = setInterval(
+    () => bot.runCompetitiveTargetUpdateCycleSafe(),
+    config.bot.intervalMs,
+  );
   // eslint-disable-next-line no-console
   console.log(
-    `Авто-режим запущен. Обновление каждые ${config.bot.intervalMinutes} минут. Нажмите Ctrl+C для остановки.`,
+    `Авто-режим пункта 4 запущен (конкурентное обновление таргетов). Период: ${config.bot.intervalMinutes} минут. Нажмите Ctrl+C для остановки.`,
   );
 
   const shutdown = async (signal) => {

@@ -356,6 +356,7 @@ export class DMarketTargetBot {
     });
     this.stateStore = new StateStore(config.bot.statePath);
     this.isCycleRunning = false;
+    this.isCompetitiveCycleRunning = false;
     this.isInitialized = false;
     this.intervalId = null;
   }
@@ -418,6 +419,326 @@ export class DMarketTargetBot {
       gameId: config.bot.gameId,
       currency: config.bot.currency,
     };
+  }
+
+  async getMinOfferUsdByTitle(title) {
+    const response = await this.client.getAggregatedPrices({
+      titles: [title],
+      limit: 1,
+      offset: 0,
+    });
+    const rows = response?.AggregatedTitles || [];
+    const exact = rows.find((row) => row?.MarketHashName === title) || rows[0];
+    if (!exact) {
+      return null;
+    }
+
+    const minOfferUsd = toUsd(
+      exact?.Offers?.BestPrice,
+      config.dmarket.aggregatedPricesInCoins,
+    );
+    if (!Number.isFinite(minOfferUsd) || minOfferUsd <= 0) {
+      return null;
+    }
+
+    return roundUsd(minOfferUsd);
+  }
+
+  extractCreatedTargetId(createResponse) {
+    const rows = createResponse?.Result;
+    if (!Array.isArray(rows)) {
+      return null;
+    }
+
+    for (const row of rows) {
+      if (row?.Successful && row?.TargetID) {
+        return row.TargetID;
+      }
+    }
+
+    return null;
+  }
+
+  async createSingleTarget({ title, amount, priceUsd }) {
+    const createResponse = await this.client.createTargets({
+      gameId: config.bot.gameId,
+      targets: [
+        toTargetPayload({
+          title,
+          amount,
+          priceUsd,
+          currency: config.bot.currency,
+        }),
+      ],
+    });
+
+    return {
+      targetId: this.extractCreatedTargetId(createResponse),
+      response: createResponse,
+    };
+  }
+
+  async deleteSingleTarget(targetId) {
+    return this.client.deleteTargets({ targetIds: [targetId] });
+  }
+
+  async updateTargetPriceSafely({ target, newPriceUsd }) {
+    const title = target.Title;
+    const oldTargetId = target.TargetID;
+    const oldPriceUsd = parseNumber(target?.Price?.Amount) || 0;
+    const amount = Math.max(1, Math.floor(parseNumber(target?.Amount) || 1));
+
+    if (config.bot.dryRun) {
+      this.logger.info("DRY-RUN: competitive target update", {
+        title,
+        oldTargetId,
+        oldPriceUsd,
+        newPriceUsd,
+      });
+      return { updated: true, dryRun: true };
+    }
+
+    // Phase 1: create first, then delete old one (prevents losing target on create failure).
+    try {
+      const created = await this.createSingleTarget({
+        title,
+        amount,
+        priceUsd: newPriceUsd,
+      });
+      if (created.targetId) {
+        await this.deleteSingleTarget(oldTargetId);
+        return {
+          updated: true,
+          strategy: "create_then_delete",
+          newTargetId: created.targetId,
+        };
+      }
+    } catch (error) {
+      this.logger.warn("Create-first update failed, will try fallback", {
+        title,
+        oldTargetId,
+        newPriceUsd,
+        message: error.message,
+        status: error.status,
+      });
+    }
+
+    // Phase 2 fallback: delete old, create new, rollback old if create fails.
+    try {
+      await this.deleteSingleTarget(oldTargetId);
+    } catch (error) {
+      this.logger.error("Fallback failed: could not delete old target", {
+        title,
+        oldTargetId,
+        message: error.message,
+        status: error.status,
+      });
+      return { updated: false, reason: "delete_old_failed" };
+    }
+
+    const createdAfterDelete = await this.createSingleTarget({
+      title,
+      amount,
+      priceUsd: newPriceUsd,
+    });
+    if (createdAfterDelete.targetId) {
+      return {
+        updated: true,
+        strategy: "delete_then_create",
+        newTargetId: createdAfterDelete.targetId,
+      };
+    }
+
+    this.logger.error("Fallback create failed, trying rollback old target", {
+      title,
+      oldTargetId,
+      oldPriceUsd,
+    });
+    const rollback = await this.createSingleTarget({
+      title,
+      amount,
+      priceUsd: oldPriceUsd,
+    });
+    return {
+      updated: false,
+      reason: rollback.targetId ? "rollback_restored_old_target" : "rollback_failed",
+    };
+  }
+
+  async runCompetitiveTargetUpdateCycleSafe() {
+    if (this.isCompetitiveCycleRunning) {
+      this.logger.warn(
+        "Skipping competitive cycle: previous competitive cycle is still running",
+      );
+      return;
+    }
+
+    this.isCompetitiveCycleRunning = true;
+    const startedAt = Date.now();
+    try {
+      await this.runCompetitiveTargetUpdateCycle();
+      this.logger.info("Competitive cycle finished", {
+        durationSec: roundUsd((Date.now() - startedAt) / 1000),
+      });
+    } catch (error) {
+      this.logger.error("Competitive cycle failed", {
+        message: error.message,
+        stack: error.stack,
+        status: error.status,
+        payload: error.payload,
+      });
+    } finally {
+      this.isCompetitiveCycleRunning = false;
+    }
+  }
+
+  async runCompetitiveTargetUpdateCycle() {
+    await this.initialize();
+    const allTargets = await this.client.getAllUserTargets({
+      gameId: config.bot.gameId,
+    });
+    const activeTargets = allTargets.filter(
+      (target) => target?.Status === "TargetStatusActive",
+    );
+
+    this.logger.info("Competitive cycle: active targets loaded", {
+      activeTargets: activeTargets.length,
+    });
+
+    for (const target of activeTargets) {
+      await this.processCompetitiveTarget(target);
+    }
+  }
+
+  async processCompetitiveTarget(target) {
+    const title = target?.Title;
+    const targetId = target?.TargetID;
+    const currentPriceUsd = parseNumber(target?.Price?.Amount);
+    if (!title || !targetId || !Number.isFinite(currentPriceUsd)) {
+      return;
+    }
+
+    const minOfferUsd = await this.getMinOfferUsdByTitle(title);
+    if (!Number.isFinite(minOfferUsd)) {
+      this.logger.warn("Competitive cycle: no offer data for title", {
+        title,
+      });
+      return;
+    }
+
+    const targetStats = await this.getTargetStatsByTitle(title, { minOfferUsd });
+    const prices = targetStats.strictAnyPrices || [];
+    if (prices.length === 0) {
+      this.logger.warn("Competitive cycle: no strict-any target prices", {
+        title,
+      });
+      return;
+    }
+
+    const bestTargetUsd = roundUsd(prices[0]);
+    const secondTargetUsd = prices.length > 1 ? roundUsd(prices[1]) : null;
+    const maxAllowedUsd = roundUsd(
+      minOfferUsd * (1 - config.bot.competitiveMinProfitMarginPct / 100),
+    );
+    const bidStepUsd = config.bot.competitiveBidStepUsd;
+    const epsilon = 0.0001;
+
+    if (
+      currentPriceUsd - maxAllowedUsd > epsilon &&
+      config.bot.competitiveDeleteUnprofitable
+    ) {
+      this.logger.warn("Competitive cycle: deleting unprofitable target", {
+        title,
+        targetId,
+        currentPriceUsd: roundUsd(currentPriceUsd),
+        maxAllowedUsd,
+      });
+      if (!config.bot.dryRun) {
+        await this.deleteSingleTarget(targetId);
+      }
+      return;
+    }
+
+    if (currentPriceUsd > bestTargetUsd + epsilon) {
+      this.logger.info("Competitive cycle: already first place", {
+        title,
+        targetId,
+        currentPriceUsd: roundUsd(currentPriceUsd),
+        bestTargetUsd,
+      });
+      return;
+    }
+
+    let desiredPriceUsd = null;
+    let reason = null;
+    if (currentPriceUsd + epsilon < bestTargetUsd) {
+      desiredPriceUsd = roundUsd(bestTargetUsd + bidStepUsd);
+      reason = "outbid";
+    } else if (
+      Math.abs(currentPriceUsd - bestTargetUsd) <= epsilon &&
+      Number.isFinite(secondTargetUsd)
+    ) {
+      desiredPriceUsd = roundUsd(secondTargetUsd + bidStepUsd);
+      reason = "equal_to_best_reprice";
+    } else {
+      this.logger.info("Competitive cycle: already on top", {
+        title,
+        targetId,
+        currentPriceUsd: roundUsd(currentPriceUsd),
+      });
+      return;
+    }
+
+    if (!Number.isFinite(desiredPriceUsd)) {
+      return;
+    }
+
+    if (desiredPriceUsd > maxAllowedUsd + epsilon) {
+      if (config.bot.competitiveDeleteUnprofitable) {
+        this.logger.warn("Competitive cycle: deleting target (profit guard)", {
+          title,
+          targetId,
+          desiredPriceUsd,
+          maxAllowedUsd,
+          reason,
+        });
+        if (!config.bot.dryRun) {
+          await this.deleteSingleTarget(targetId);
+        }
+      } else {
+        this.logger.info("Competitive cycle: skip update by profit guard", {
+          title,
+          targetId,
+          desiredPriceUsd,
+          maxAllowedUsd,
+          reason,
+        });
+      }
+      return;
+    }
+
+    if (Math.abs(desiredPriceUsd - currentPriceUsd) < 0.005) {
+      this.logger.info("Competitive cycle: no meaningful price delta", {
+        title,
+        targetId,
+        currentPriceUsd: roundUsd(currentPriceUsd),
+        desiredPriceUsd,
+      });
+      return;
+    }
+
+    const updateResult = await this.updateTargetPriceSafely({
+      target,
+      newPriceUsd: desiredPriceUsd,
+    });
+    this.logger.info("Competitive cycle: target update result", {
+      title,
+      targetId,
+      currentPriceUsd: roundUsd(currentPriceUsd),
+      desiredPriceUsd,
+      reason,
+      updateResult,
+    });
   }
 
   async discoverTitlesFromMarket({
@@ -522,7 +843,7 @@ export class DMarketTargetBot {
     });
   }
 
-  async getTargetStatsByTitle(title) {
+  async getTargetStatsByTitle(title, { minOfferUsd = null } = {}) {
     try {
       const response = await this.client.getTargetsByTitle({
         gameId: config.bot.gameId,
@@ -531,7 +852,7 @@ export class DMarketTargetBot {
       const orders = extractTargetOrdersArray(response);
 
       const allPrices = [];
-      const strictAnyPrices = [];
+      let strictAnyPrices = [];
       for (const order of orders) {
         const priceUsd = extractOrderPriceUsd(
           order,
@@ -547,6 +868,20 @@ export class DMarketTargetBot {
         }
       }
 
+      let scaleAdjusted = false;
+      if (strictAnyPrices.length > 0 && Number.isFinite(minOfferUsd)) {
+        const range = normalizeTargetRangeByOffer({
+          minTargetUsd: Math.min(...strictAnyPrices),
+          maxTargetUsd: Math.max(...strictAnyPrices),
+          minOfferUsd,
+        });
+        if (range.scaleAdjusted) {
+          scaleAdjusted = true;
+          strictAnyPrices = strictAnyPrices.map((price) => roundUsd(price / 100));
+        }
+      }
+
+      strictAnyPrices = strictAnyPrices.sort((a, b) => b - a);
       const selectedPrices = strictAnyPrices;
       const minTargetUsd =
         selectedPrices.length > 0 ? roundUsd(Math.min(...selectedPrices)) : null;
@@ -559,7 +894,9 @@ export class DMarketTargetBot {
         rawResponse: response,
         totalOrdersCount: orders.length,
         parsedPricesCount: allPrices.length,
+        strictAnyPrices,
         strictAnyOrdersCount: strictAnyPrices.length,
+        scaleAdjusted,
         selectedSource:
           strictAnyPrices.length > 0 ? "strict_any_orders" : "no_strict_any_orders",
       };
@@ -576,6 +913,7 @@ export class DMarketTargetBot {
         totalOrdersCount: 0,
         parsedPricesCount: 0,
         strictAnyOrdersCount: 0,
+        scaleAdjusted: false,
         selectedSource: "unavailable",
       };
     }
@@ -644,7 +982,9 @@ export class DMarketTargetBot {
           continue;
         }
 
-        const targetStats = await this.getTargetStatsByTitle(title);
+        const targetStats = await this.getTargetStatsByTitle(title, {
+          minOfferUsd,
+        });
         if (!Number.isFinite(targetStats.maxTargetUsd)) {
           processed += 1;
           if (
@@ -658,34 +998,23 @@ export class DMarketTargetBot {
         }
 
         const maxTargetUsd = targetStats.maxTargetUsd;
-        let minTargetUsd = Number.isFinite(targetStats.minTargetUsd)
+        const minTargetUsd = Number.isFinite(targetStats.minTargetUsd)
           ? targetStats.minTargetUsd
           : targetStats.maxTargetUsd;
-        let normalizedMaxTargetUsd = maxTargetUsd;
-
-        const normalizedRange = normalizeTargetRangeByOffer({
-          minTargetUsd,
-          maxTargetUsd,
-          minOfferUsd,
-        });
-        minTargetUsd = normalizedRange.minTargetUsd;
-        normalizedMaxTargetUsd = normalizedRange.maxTargetUsd;
         const edgePct =
           minOfferUsd > 0
-            ? roundUsd(
-                ((normalizedMaxTargetUsd - minOfferUsd) / minOfferUsd) * 100,
-              )
+            ? roundUsd(((maxTargetUsd - minOfferUsd) / minOfferUsd) * 100)
             : 0;
         const roiPct = edgePct;
 
         rows[currentIndex] = {
           title,
-          maxTargetUsd: normalizedMaxTargetUsd,
+          maxTargetUsd,
           minTargetUsd,
           minOfferUsd: roundUsd(minOfferUsd),
-          targetPriceUsd: normalizedMaxTargetUsd,
+          targetPriceUsd: maxTargetUsd,
           orderBestUsd: roundUsd(minOfferUsd),
-          targetBestUsd: normalizedMaxTargetUsd,
+          targetBestUsd: maxTargetUsd,
           edgePct,
           roiPct,
           offerCount,
@@ -693,7 +1022,7 @@ export class DMarketTargetBot {
           targetSource: targetStats.selectedSource,
           targetOrdersCount: targetStats.totalOrdersCount,
           targetStrictAnyOrdersCount: targetStats.strictAnyOrdersCount,
-          targetScaleAdjusted: normalizedRange.scaleAdjusted,
+          targetScaleAdjusted: targetStats.scaleAdjusted,
           rawTargetsByTitle: targetStats.rawResponse,
         };
 
