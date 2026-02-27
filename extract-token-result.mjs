@@ -295,20 +295,12 @@ async function main() {
     }
   }
 
-  const output = {
-    token: args.mint,
-    filter: {
-      at: args.at || null,
-      from: args.from || null,
-      to: args.to || null,
-    },
-    snapshots_count: snapshots.length,
-    snapshots,
-  };
-
-  if (args.flatTxs) {
-    output.txs = uniqueTxsFromSnapshots(snapshots);
-  }
+  const output = args.flatTxs
+    ? {
+        snapshots,
+        txs: uniqueTxsFromSnapshots(snapshots),
+      }
+    : snapshots;
 
   await writeFile(args.output, `${JSON.stringify(output, null, 2)}\n`, "utf8");
 
